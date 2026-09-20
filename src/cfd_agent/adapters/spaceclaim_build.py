@@ -161,6 +161,26 @@ class SpaceClaimBuildAdapter:
             },
         )
 
+    def use_existing_fluid(
+        self,
+        *,
+        source: str | Path,
+        output: str | Path,
+        catalog: dict[str, Any],
+        selection_plan: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Reuse a validated closed solid without running VolumeExtract."""
+
+        return self._execute(
+            "use_existing_fluid",
+            {
+                "input": str(Path(source).resolve()),
+                "output": str(Path(output).resolve()),
+                "catalog": catalog,
+                "selection_plan": selection_plan,
+            },
+        )
+
     def label_faces(
         self, *, source: str | Path, output: str | Path, extraction: dict[str, Any], keep_open: bool
     ) -> dict[str, Any]:

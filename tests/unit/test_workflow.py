@@ -15,6 +15,7 @@ from cfd_agent.nodes import confirmation, fluent, review
 from cfd_agent.nodes.confirmation import human_confirmation
 from cfd_agent.nodes.review import review_failure
 from cfd_agent.services.contracts import RepairDecision
+from cfd_agent.services.geometry_models import GeometryCatalog, is_closed_single_solid
 from cfd_agent.state import PipelineState
 from cfd_agent.workers.mesh_job import MeshJob
 from cfd_agent.workers.repair_protocol import RepairState
@@ -34,6 +35,111 @@ def test_graph_contains_spaceclaim_and_fluent_steps(tmp_path: Path):
         "boundary_layers",
         "volume_mesh",
     } <= names
+
+
+def test_closed_single_solid_is_eligible_for_direct_meshing():
+    catalog = GeometryCatalog(
+        catalog_id="closed",
+        geometry_id="closed",
+        bodies=[
+            {
+                "id": "B1",
+                "kind": "body",
+                "solid_or_sheet": "solid",
+                "volume_m3": 1.0,
+                "face_ids": ["F1", "F2"],
+                "edge_ids": ["E1"],
+            }
+        ],
+        faces=[
+            {"id": "F1", "kind": "face"},
+            {"id": "F2", "kind": "face"},
+        ],
+        edges=[{"id": "E1", "kind": "edge", "face_ids": ["F1", "F2"]}],
+    )
+
+    assert is_closed_single_solid(catalog)
+
+
+@pytest.mark.parametrize(
+    "body, edge_faces",
+    [
+        ({"solid_or_sheet": "sheet", "volume_m3": None}, ["F1", "F2"]),
+        ({"solid_or_sheet": "solid", "volume_m3": 1.0}, ["F1"]),
+    ],
+)
+def test_open_or_sheet_geometry_stays_on_volume_extract_path(body, edge_faces):
+    catalog = GeometryCatalog(
+        catalog_id="open",
+        geometry_id="open",
+        bodies=[
+            {
+                "id": "B1",
+                "kind": "body",
+                **body,
+                "edge_ids": ["E1"],
+            }
+        ],
+        edges=[{"id": "E1", "kind": "edge", "face_ids": edge_faces}],
+    )
+
+    assert not is_closed_single_solid(catalog)
+
+
+def test_cad_node_reuses_closed_solid_without_extracting(tmp_path: Path, monkeypatch):
+    from cfd_agent.nodes import cad
+
+    catalog = GeometryCatalog(
+        catalog_id="closed",
+        geometry_id="closed",
+        bodies=[
+            {
+                "id": "B1",
+                "kind": "body",
+                "solid_or_sheet": "solid",
+                "volume_m3": 1.0,
+                "face_ids": ["F1", "F2"],
+                "edge_ids": ["E1"],
+            }
+        ],
+        faces=[
+            {"id": "F1", "kind": "face"},
+            {"id": "F2", "kind": "face"},
+        ],
+        edges=[{"id": "E1", "kind": "edge", "face_ids": ["F1", "F2"]}],
+        native_catalog={"public": {}, "internal": {}},
+    )
+    calls = []
+
+    class Adapter:
+        def __init__(self, **kwargs):
+            pass
+
+        def use_existing_fluid(self, **kwargs):
+            calls.append("use_existing_fluid")
+            return {"transfer": {"mode": "existing_solid"}}
+
+        def extract_volume(self, **kwargs):
+            calls.append("extract_volume")
+            pytest.fail("closed solid must not call VolumeExtract")
+
+    monkeypatch.setattr(cad, "SpaceClaimBuildAdapter", Adapter)
+    (tmp_path / "state").mkdir()
+    result = cad.extract_volume(
+        {
+            "runtime_dir": str(tmp_path),
+            "run_dir": str(tmp_path),
+            "ui_mode": "hidden",
+            "runtime_config": {},
+            "working_geometry": str(tmp_path / "original.scdoc"),
+            "catalog": catalog.model_dump(mode="json"),
+            "selection_plan": {},
+        }
+    )
+
+    assert not result["error"]
+    assert result["fluid_domain_mode"] == "existing_solid"
+    assert calls == ["use_existing_fluid"]
 
 
 def test_human_confirmation_interrupt_can_resume(tmp_path: Path):
@@ -330,6 +436,8 @@ def test_prepare_retry_preserves_budget_until_exhaustion(tmp_path, monkeypatch):
     assert result["repair_rounds"] == 2
     assert [row["round"] for row in result["repair_history"]] == [1, 2]
     assert result["repair_decision"]["diagnosis"] == "Repair budget exhausted"
+    assert result["repair_decision_source"] == "system"
+    assert result["repair_stop_reason"] == "repair_budget_exhausted"
 
 
 @pytest.mark.parametrize("keep_open", [False, True])

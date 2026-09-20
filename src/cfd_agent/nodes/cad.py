@@ -11,7 +11,7 @@ from cfd_agent.adapters.spaceclaim import SpaceClaimRunner
 from cfd_agent.adapters.spaceclaim_build import SpaceClaimBuildAdapter
 from cfd_agent.config import config_from_state
 from cfd_agent.services.execution import _copy_runtime_evidence, _failed, _persist, _run_dir
-from cfd_agent.services.geometry_models import GeometryCatalog
+from cfd_agent.services.geometry_models import GeometryCatalog, is_closed_single_solid
 from cfd_agent.services.grounding import extract_mesh_requirements, plan_cad_selection
 from cfd_agent.state import PipelineState
 
@@ -134,22 +134,35 @@ def verify_selection(state: PipelineState) -> dict[str, Any]:
 def extract_volume(state: PipelineState) -> dict[str, Any]:
     try:
         output = Path(state["runtime_dir"]) / "extracted.scdoc"
+        catalog = GeometryCatalog.model_validate(state["catalog"])
+        direct = is_closed_single_solid(catalog)
         adapter = SpaceClaimBuildAdapter(
             runtime_dir=state["runtime_dir"],
             ui_mode=state["ui_mode"],
             config=config_from_state(state),
         )
-        result = adapter.extract_volume(
-            source=state["working_geometry"],
-            output=output,
-            catalog=GeometryCatalog.model_validate(state["catalog"]).native_catalog,
-            selection_plan=state["selection_plan"],
-        )
+        if direct:
+            result = adapter.use_existing_fluid(
+                source=state["working_geometry"],
+                output=output,
+                catalog=catalog.native_catalog,
+                selection_plan=state["selection_plan"],
+            )
+            mode = "existing_solid"
+        else:
+            result = adapter.extract_volume(
+                source=state["working_geometry"],
+                output=output,
+                catalog=catalog.native_catalog,
+                selection_plan=state["selection_plan"],
+            )
+            mode = "volume_extract"
         return _persist(
             state,
             "extract_volume",
             {
                 "extraction": result,
+                "fluid_domain_mode": mode,
                 "working_geometry": str(output),
                 "error": "",
             },

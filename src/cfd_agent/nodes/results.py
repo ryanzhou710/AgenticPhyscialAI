@@ -60,6 +60,8 @@ def failed(state: PipelineState) -> dict[str, Any]:
         "failed_step": state.get("failed_step"),
         "error": state.get("error"),
         "error_evidence": state.get("error_evidence", {}),
+        "repair_decision_source": state.get("repair_decision_source", "unknown"),
+        "repair_stop_reason": state.get("repair_stop_reason", ""),
         "repair_rounds": state.get("repair_rounds", 0),
         "repair_history": state.get("repair_history", []),
         "runtime_evidence": evidence,

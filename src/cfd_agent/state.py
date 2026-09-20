@@ -31,6 +31,7 @@ class PipelineState(TypedDict, total=False):
     selection_plan: dict[str, Any]
     mesh_requirements: dict[str, Any]
     native_selection: dict[str, Any]
+    fluid_domain_mode: Literal["existing_solid", "volume_extract"]
     extraction: dict[str, Any]
     labeling: dict[str, Any]
     cad_validation: dict[str, Any]
@@ -40,6 +41,8 @@ class PipelineState(TypedDict, total=False):
     fluent_job: dict[str, Any]
     fluent_steps: dict[str, Any]
     repair_decision: dict[str, Any]
+    repair_decision_source: Literal["llm", "system"]
+    repair_stop_reason: str
     repair_history: list[dict[str, Any]]
     parameter_confirmation: dict[str, Any]
     artifacts: dict[str, str]

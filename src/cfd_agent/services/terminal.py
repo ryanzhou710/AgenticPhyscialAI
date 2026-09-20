@@ -7,7 +7,7 @@ LABELS = {
     "query_geometry": "Query SpaceClaim geometry and reference views",
     "understand_prompt": "LLM object selection and mesh requirements",
     "verify_selection": "Verify native SpaceClaim selection",
-    "extract_volume": "SpaceClaim: extract fluid volume",
+    "extract_volume": "SpaceClaim: reuse closed fluid solid or extract fluid volume",
     "label_faces": "SpaceClaim: group and label boundaries",
     "validate_cad": "Check CAD and boundary coverage",
     "reload_confirmed_cad": "Read confirmed CAD and boundary groups",
@@ -45,6 +45,15 @@ def progress_node(stage, operation):
             decision = update.get("repair_decision", {})
             if decision.get("action") == "stop":
                 print("[Failed] Diagnosis: " + brief(decision.get("diagnosis")), flush=True)
+                source = update.get(
+                    "repair_decision_source", state.get("repair_decision_source", "unknown")
+                )
+                reason = update.get(
+                    "repair_stop_reason", state.get("repair_stop_reason", "")
+                )
+                print("  Decision source: " + brief(source), flush=True)
+                if reason:
+                    print("  Stop reason: " + brief(reason), flush=True)
                 if decision.get("diagnosis") == "Reviewer failed":
                     print("  " + brief(decision.get("evidence")), flush=True)
             else:

@@ -111,6 +111,28 @@ class GeometryCatalog(BaseModel):
         }
 
 
+def is_closed_single_solid(catalog: GeometryCatalog) -> bool:
+    """Return whether the catalog describes one reusable closed fluid solid.
+
+    This is deliberately conservative.  A positive-volume solid is eligible for
+    direct meshing only when it is the only body and none of its edges are free.
+    Sheet bodies, multi-body assemblies and open shells continue through the
+    existing Volume Extract path.
+    """
+
+    if len(catalog.bodies) != 1:
+        return False
+    body = catalog.bodies[0]
+    if body.solid_or_sheet != "solid" or body.volume_m3 is None or body.volume_m3 <= 0:
+        return False
+    objects = catalog.by_id()
+    for edge_id in body.edge_ids:
+        edge = objects.get(edge_id)
+        if edge is None or len(edge.face_ids) != 2:
+            return False
+    return True
+
+
 class SelectionExecution(BaseModel):
     ok: bool
     selected_ids: list[str] = Field(default_factory=list)
