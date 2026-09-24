@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from cfd_agent.adapters.spaceclaim import SpaceClaimRunner
+from src.adapters.spaceclaim import SpaceClaimRunner
 
 
 def test_catalog_preserves_candidate_render_failures_without_failing(tmp_path, monkeypatch):

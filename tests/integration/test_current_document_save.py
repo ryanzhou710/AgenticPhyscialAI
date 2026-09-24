@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from cfd_agent.adapters.spaceclaim import SpaceClaimRunner
-from cfd_agent.adapters.spaceclaim_build import SpaceClaimBuildAdapter
-from cfd_agent.adapters.windows_process import request_window_close
-from cfd_agent.services.artifacts import write_json
-from cfd_agent.services.boundaries import named_groups
+from src.adapters.spaceclaim import SpaceClaimRunner
+from src.adapters.spaceclaim_build import SpaceClaimBuildAdapter
+from src.adapters.windows_process import request_window_close
+from src.services.artifacts import write_json
+from src.services.boundaries import named_groups
 
 
 @pytest.mark.skipif(

@@ -1,8 +1,8 @@
 """Opening topology candidates exposed to the CAD grounding model."""
 
-from cfd_agent.nodes.cad import _is_existing_fluid_body, _prompt_explicitly_declares_fluid_body
-from cfd_agent.services.geometry_models import GeometryCatalog
-from cfd_agent.services.grounding import _opening_candidate_context
+from src.nodes.cad import _is_existing_fluid_body
+from src.services.geometry_models import GeometryCatalog
+from src.services.grounding import _opening_candidate_context
 
 
 def test_opening_context_exposes_planar_faces_and_closed_arbitrary_loops():
@@ -106,18 +106,8 @@ def test_multiple_bodies_cannot_skip_volume_extract():
     assert not _is_existing_fluid_body(catalog)
 
 
-def test_volume_extraction_is_the_default_when_prompt_is_silent():
-    assert not _prompt_explicitly_declares_fluid_body("Select the left inlet and right outlet.")
-
-
-def test_existing_fluid_body_requires_an_explicit_prompt_statement():
-    assert _prompt_explicitly_declares_fluid_body(
-        "The input is already the fluid domain; keep its existing volume."
-    )
-
-
 def test_cad_node_uses_volume_extract_for_a_silent_closed_body(tmp_path, monkeypatch):
-    from cfd_agent.nodes import cad
+    from src.nodes import cad
 
     catalog = GeometryCatalog(
         catalog_id="catalog",
@@ -154,10 +144,9 @@ def test_cad_node_uses_volume_extract_for_a_silent_closed_body(tmp_path, monkeyp
             "run_dir": str(tmp_path),
             "ui_mode": "hidden",
             "runtime_config": {},
-            "prompt": "Select the left inlet and right outlet.",
             "working_geometry": str(tmp_path / "original.scdoc"),
             "catalog": catalog.model_dump(mode="json"),
-            "selection_plan": {"openings": []},
+            "selection_plan": {"openings": [], "fluid_domain_action": "extract"},
         }
     )
 
@@ -167,7 +156,7 @@ def test_cad_node_uses_volume_extract_for_a_silent_closed_body(tmp_path, monkeyp
 
 
 def test_cad_node_reuses_only_an_explicitly_declared_fluid_body(tmp_path, monkeypatch):
-    from cfd_agent.nodes import cad
+    from src.nodes import cad
 
     catalog = GeometryCatalog(
         catalog_id="catalog",
@@ -204,10 +193,9 @@ def test_cad_node_reuses_only_an_explicitly_declared_fluid_body(tmp_path, monkey
             "run_dir": str(tmp_path),
             "ui_mode": "hidden",
             "runtime_config": {},
-            "prompt": "The input is already the fluid domain; keep its existing volume.",
             "working_geometry": str(tmp_path / "original.scdoc"),
             "catalog": catalog.model_dump(mode="json"),
-            "selection_plan": {"openings": []},
+            "selection_plan": {"openings": [], "fluid_domain_action": "reuse"},
         }
     )
 
@@ -219,7 +207,7 @@ def test_cad_node_reuses_only_an_explicitly_declared_fluid_body(tmp_path, monkey
 def test_explicit_fluid_declaration_with_invalid_topology_routes_to_reviewer(
     tmp_path, monkeypatch
 ):
-    from cfd_agent.nodes import cad
+    from src.nodes import cad
 
     catalog = GeometryCatalog(
         catalog_id="catalog",
@@ -240,10 +228,9 @@ def test_explicit_fluid_declaration_with_invalid_topology_routes_to_reviewer(
             "run_dir": str(tmp_path),
             "ui_mode": "hidden",
             "runtime_config": {},
-            "prompt": "The input is already the fluid domain.",
             "working_geometry": str(tmp_path / "original.scdoc"),
             "catalog": catalog.model_dump(mode="json"),
-            "selection_plan": {"openings": []},
+            "selection_plan": {"openings": [], "fluid_domain_action": "reuse"},
         }
     )
 

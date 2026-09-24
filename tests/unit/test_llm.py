@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from cfd_agent.adapters.llm import (
+from src.adapters.llm import (
     CodexOAuthCredentials,
     CodexOAuthResponsesTransport,
     ProviderRequestError,
@@ -44,8 +44,8 @@ def test_provider_error_code_is_retained_without_response_body():
 
 
 def test_custom_model_is_sent_by_existing_transport(monkeypatch):
-    from cfd_agent.adapters import llm
-    from cfd_agent.services.contracts import ConfirmationPayload
+    from src.adapters import llm
+    from src.services.contracts import ConfirmationPayload
 
     payloads = []
 
@@ -62,7 +62,7 @@ def test_custom_model_is_sent_by_existing_transport(monkeypatch):
 
 
 def test_missing_codex_cache_starts_cli_login(monkeypatch):
-    from cfd_agent.adapters import llm
+    from src.adapters import llm
 
     credentials = iter(
         [FileNotFoundError("missing"), CodexOAuthCredentials("offline")]
@@ -95,7 +95,7 @@ def test_missing_codex_cache_starts_cli_login(monkeypatch):
 
 
 def test_device_auth_mode_is_forwarded_to_codex_cli(monkeypatch):
-    from cfd_agent.adapters import llm
+    from src.adapters import llm
 
     monkeypatch.setenv("FOAMAGENT_CODEX_DEVICE_AUTH", "1")
     login_calls = []
@@ -114,7 +114,7 @@ def test_device_auth_mode_is_forwarded_to_codex_cli(monkeypatch):
 
 
 def test_openai_api_key_transport_uses_standard_bearer_header():
-    from cfd_agent.adapters.llm import OpenAIAPIKeyResponsesTransport
+    from src.adapters.llm import OpenAIAPIKeyResponsesTransport
 
     transport = OpenAIAPIKeyResponsesTransport("sk-test-only")
 
@@ -127,8 +127,8 @@ def test_openai_api_key_transport_uses_standard_bearer_header():
 
 
 def test_runtime_config_selects_api_key_client(monkeypatch):
-    from cfd_agent.adapters import llm
-    from cfd_agent.config import RuntimeConfig
+    from src.adapters import llm
+    from src.config import RuntimeConfig
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-only")
     monkeypatch.setattr(
@@ -146,7 +146,7 @@ def test_runtime_config_selects_api_key_client(monkeypatch):
 
 
 def test_api_key_mode_requires_environment_variable(monkeypatch):
-    from cfd_agent.adapters import llm
+    from src.adapters import llm
 
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
@@ -155,11 +155,11 @@ def test_api_key_mode_requires_environment_variable(monkeypatch):
 
 
 def test_selection_requirements_and_reviewer_share_configured_model(tmp_path, monkeypatch):
-    from cfd_agent.adapters.llm import GroundingLLMClient
-    from cfd_agent.config import RuntimeConfig
-    from cfd_agent.services import grounding, reviewer
-    from cfd_agent.services.contracts import CadSelectionPlan, MeshRequirements, RepairDecision
-    from cfd_agent.services.geometry_models import GeometryCatalog
+    from src.adapters.llm import GroundingLLMClient
+    from src.config import RuntimeConfig
+    from src.services import grounding, reviewer
+    from src.services.contracts import CadSelectionPlan, MeshRequirements, RepairDecision
+    from src.services.geometry_models import GeometryCatalog
 
     selected = CadSelectionPlan(
         status="selected",
@@ -224,8 +224,8 @@ def test_selection_requirements_and_reviewer_share_configured_model(tmp_path, mo
 
 
 def test_visual_edge_candidates_only_include_supported_circular_open_edges():
-    from cfd_agent.services.geometry_models import GeometryCatalog
-    from cfd_agent.services.grounding import _native_open_edges
+    from src.services.geometry_models import GeometryCatalog
+    from src.services.grounding import _native_open_edges
 
     native_edges = [
         {"id": "E-circle-open", "curve_type": "Circle", "face_ids": ["F1"]},

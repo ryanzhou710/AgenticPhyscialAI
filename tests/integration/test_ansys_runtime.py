@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from cfd_agent.adapters.spaceclaim import SpaceClaimRunner
+from src.adapters.spaceclaim import SpaceClaimRunner
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("CFD_AGENT_RUN_ANSYS_INTEGRATION") != "1",

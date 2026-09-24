@@ -1,6 +1,6 @@
 import pytest
 
-from cfd_agent.services.terminals import resolve_terminal_boundary
+from src.services.terminals import resolve_terminal_boundary
 
 
 def catalog(*, faces=None, edges=None, loops=None):

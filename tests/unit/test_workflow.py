@@ -10,20 +10,20 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 from pydantic import ValidationError
 
-from cfd_agent.graph import build_graph
-from cfd_agent.nodes import confirmation, fluent, review
-from cfd_agent.nodes.confirmation import human_confirmation
-from cfd_agent.nodes.review import review_failure
-from cfd_agent.services.contracts import RepairDecision
-from cfd_agent.state import PipelineState
-from cfd_agent.workers.mesh_job import MeshJob
-from cfd_agent.workers.repair_protocol import RepairState
+from src.graph import build_graph
+from src.nodes import confirmation, fluent, review
+from src.nodes.confirmation import human_confirmation
+from src.nodes.review import review_failure
+from src.services.contracts import RepairDecision
+from src.state import PipelineState
+from src.workers.mesh_job import MeshJob
+from src.workers.repair_protocol import RepairState
 
 
 def test_graph_contains_spaceclaim_and_fluent_steps(tmp_path: Path):
     graph = build_graph(tmp_path / "checkpoints.sqlite")
     names = set(graph.get_graph().nodes)
-    assert {"extract_volume", "label_faces", "human_confirmation"} <= names
+    assert {"extract_volume", "label_faces", "human_confirmation", "rebuild_fluent"} <= names
     assert {
         "import_geometry",
         "local_sizing",
@@ -61,6 +61,20 @@ def test_human_confirmation_interrupt_can_resume(tmp_path: Path):
     assert resumed["human_response"]["action"] == "approve"
 
 
+def test_intervention_rebuild_replays_preceding_fluent_steps_before_repair(monkeypatch):
+    from src.nodes import fluent as fluent_nodes
+
+    monkeypatch.setattr(fluent_nodes, "launch_fluent", lambda state: {"error": ""})
+    assert fluent_nodes.rebuild_fluent({}).goto == "import_geometry"
+    pending = fluent_nodes.fluent_step("boundary_layers")(
+        {"pending_repair_after_rebuild": True, "failed_step": "boundary_layers"}
+    )
+    assert pending.goto == "apply_repair"
+    assert fluent_nodes.validate_mesh(
+        {"pending_repair_after_rebuild": True, "failed_step": "final_validation"}
+    ).goto == "apply_repair"
+
+
 def test_zero_repair_budget_stops_without_calling_model(tmp_path: Path):
     (tmp_path / "state").mkdir()
     state = {
@@ -78,7 +92,7 @@ def test_zero_repair_budget_stops_without_calling_model(tmp_path: Path):
 
 
 def test_llm_requested_stop_records_its_decision_source(tmp_path: Path, monkeypatch):
-    from cfd_agent.services import reviewer
+    from src.services import reviewer
 
     class Client:
         def invoke(self, **kwargs):
@@ -107,7 +121,7 @@ def test_llm_requested_stop_records_its_decision_source(tmp_path: Path, monkeypa
 
 
 def test_failed_result_keeps_compatibility_with_old_state_without_stop_fields(tmp_path: Path):
-    from cfd_agent.nodes.results import failed
+    from src.nodes.results import failed
 
     result = failed(
         {
@@ -175,7 +189,7 @@ def test_reviewer_reference_requires_the_executable_fields():
 
 
 def test_fluent_review_uses_structured_requirements_without_old_cad_notes():
-    from cfd_agent.services.reviewer import fluent_review_inputs
+    from src.services.reviewer import fluent_review_inputs
 
     state = {
         "mesh_requirements": {"global_size": {"value": 10}, "notes": ["old CAD instructions"]},
@@ -192,7 +206,7 @@ def test_fluent_review_uses_structured_requirements_without_old_cad_notes():
 
 
 def test_gui_editing_window_is_kept_without_final_keep_open(tmp_path, monkeypatch):
-    from cfd_agent.nodes import cad
+    from src.nodes import cad
 
     calls = []
 
@@ -265,7 +279,7 @@ def test_cancel_ends_graph_without_review_or_cad_reload(tmp_path, monkeypatch):
 def test_invalid_repair_routes_stop_before_software(
     monkeypatch, failed, action, target, parameters
 ):
-    from cfd_agent.services import reviewer
+    from src.services import reviewer
 
     monkeypatch.setattr(reviewer, "get_client", lambda *args: pytest.fail("no software call"))
     outcome = reviewer.execute_repair(
@@ -298,7 +312,7 @@ def test_fluent_repairs_resume_failed_or_affected_step(
 ):
     from types import SimpleNamespace
 
-    from cfd_agent.services import reviewer
+    from src.services import reviewer
 
     calls = []
 
@@ -327,9 +341,9 @@ def test_fluent_repairs_resume_failed_or_affected_step(
 
 
 def test_prepare_retry_preserves_budget_until_exhaustion(tmp_path, monkeypatch):
-    from cfd_agent.nodes import cad
-    from cfd_agent.services import reviewer
-    from cfd_agent.services.execution import _failed
+    from src.nodes import cad
+    from src.services import reviewer
+    from src.services.execution import _failed
 
     source = tmp_path / "input.scdoc"
     source.write_bytes(b"offline")
@@ -387,7 +401,7 @@ def test_cancel_after_fluent_returns_to_human_closes_owned_session(
 ):
     from types import SimpleNamespace
 
-    from cfd_agent.adapters import fluent as transport
+    from src.adapters import fluent as transport
 
     closed = []
     client = SimpleNamespace(_broken=False, process=SimpleNamespace(poll=lambda: None))
@@ -430,7 +444,9 @@ def test_cancel_after_fluent_returns_to_human_closes_owned_session(
         as_node="review_failure",
     )
     assert graph.invoke(None, config)["__interrupt__"]
-    assert transport.has_live_client("returned")
+    # A CAD-revision pause must archive and close the old Fluent session.  A
+    # later confirmation starts a fresh session from the saved CAD.
+    assert not transport.has_live_client("returned")
     result = graph.invoke(Command(resume={"action": "cancel"}), config)
     assert result["status"] == "cancelled"
     assert closed == ["returned"]

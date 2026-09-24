@@ -22,16 +22,13 @@ dependencies = [
 dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
 
 [project.scripts]
-cfd-agent = "cfd_agent.cli:main"
+cfd-agent = "src.cli:main"
 
 [tool.setuptools]
-package-dir = {"" = "src"}
-
-[tool.setuptools.packages.find]
-where = ["src"]
+packages = ["src", "src.adapters", "src.nodes", "src.prompts", "src.services", "src.workers"]
 
 [tool.setuptools.package-data]
-cfd_agent = ["prompts/*.md"]
+src = ["prompts/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -41,8 +38,9 @@ addopts = "-q"
 target-version = "py312"
 line-length = 100
 extend-exclude = [
+  ".wheel-venv/",
   "examples/",
-  "src/cfd_agent/workers/spaceclaim*_v241.py",
+  "src/workers/spaceclaim*_v241.py",
   "tests/integration/native_*_fixture_v241.py",
 ]
 

@@ -5,13 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from cfd_agent.services.boundaries import build_fluent_job, rebind_mesh_targets
-from cfd_agent.services.contracts import CadSelectionPlan, ConfirmationPayload
-from cfd_agent.services.geometry_models import GeometryCatalog
-from cfd_agent.services.units import convert_length
-from cfd_agent.workers.fluent_tasks import WatertightMeshingRunner
-from cfd_agent.workers.mesh_job import MeshJob
-from cfd_agent.workers.repair_protocol import RepairState
+from src.services.boundaries import build_fluent_job, rebind_mesh_targets
+from src.services.contracts import CadSelectionPlan, ConfirmationPayload
+from src.services.geometry_models import GeometryCatalog
+from src.services.units import convert_length
+from src.workers.fluent_tasks import WatertightMeshingRunner
+from src.workers.mesh_job import MeshJob
+from src.workers.repair_protocol import RepairState
 
 
 def test_selected_plan_requires_seed_and_opening():
@@ -292,14 +292,14 @@ def test_renamed_group_rebinds_by_exact_native_membership():
 
 
 def test_inferred_disable_is_not_an_explicit_user_request():
-    from cfd_agent.services.contracts import BoundaryLayerRequest
+    from src.services.contracts import BoundaryLayerRequest
 
     with pytest.raises(ValueError, match="explicit user request"):
         BoundaryLayerRequest(layers=0, layers_source="inferred")
 
 
 def test_nested_controls_use_workflow_assignment_not_transient_command():
-    from cfd_agent.workers.fluent_tasks import set_task_value
+    from src.workers.fluent_tasks import set_task_value
 
     class NativeProxy:
         def __init__(self):
@@ -335,7 +335,7 @@ def test_unresolved_and_empty_layer_scopes_reach_native_interface(tmp_path):
 
 
 def test_numeric_ranges_reach_native_interface_and_repair_controls(tmp_path):
-    from cfd_agent.services.contracts import MeshRequirements
+    from src.services.contracts import MeshRequirements
 
     requirements = MeshRequirements.model_validate(
         {
@@ -377,24 +377,26 @@ def test_numeric_ranges_reach_native_interface_and_repair_controls(tmp_path):
     assert tasks["boundary_layers"].first_height.get_state() == -0.7
 
 
-@pytest.mark.parametrize(
-    "scenario", ["inferred", "accept", "manual", "retry", "cancel", "scope", "height"]
-)
-def test_native_rejection_routes_through_reviewer_and_confirmation(tmp_path, monkeypatch, scenario):
+@pytest.mark.parametrize("scenario", ["inferred", "user", "locked", "scope", "height"])
+def test_native_rejection_automates_numeric_repairs_and_pauses_only_for_mappings_or_locks(
+    tmp_path, monkeypatch, scenario
+):
     """Use the real graph/repair worker with native and model doubles, no Ansys calls."""
     import json
 
-    from cfd_agent import api
-    from cfd_agent.adapters.fluent import FluentWorkerError
-    from cfd_agent.graph import build_graph
-    from cfd_agent.nodes import confirmation, fluent, results
-    from cfd_agent.services import reviewer
-    from cfd_agent.services.contracts import RepairDecision
-    from cfd_agent.workers.fluent_tasks import StepExecutionError
-    from cfd_agent.workers.fluent_worker import FluentWorker
+    from src import api
+    from src.adapters.fluent import FluentWorkerError
+    from src.graph import build_graph
+    from src.nodes import confirmation, fluent, results
+    from src.services import reviewer
+    from src.services.contracts import RepairDecision
+    from src.workers.fluent_tasks import StepExecutionError
+    from src.workers.fluent_worker import FluentWorker
 
     source = "inferred" if scenario == "inferred" else "user"
     layers = {"layers": 80, "layers_source": source, "target": "wall_a"}
+    if scenario == "locked":
+        layers["layers_locked"] = True
     if scenario == "scope":
         layers.update(layers=3, target="unknown")
     if scenario == "height":
@@ -458,7 +460,13 @@ def test_native_rejection_routes_through_reviewer_and_confirmation(tmp_path, mon
     closed = []
     monkeypatch.setattr(confirmation, "close_client", closed.append)
     checkpoint = tmp_path / "checkpoints.sqlite"
-    metadata = {"run_id": "numeric", "checkpoint": str(checkpoint), "max_repair_rounds": 4}
+    metadata = {
+        "run_id": "numeric",
+        "checkpoint": str(checkpoint),
+        "max_repair_rounds": 4,
+        "max_total_repair_rounds": 100,
+        "run_format_version": 2,
+    }
     (tmp_path / "run-metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
     graph = build_graph(checkpoint)
     config = {"configurable": {"thread_id": "numeric"}}
@@ -479,32 +487,27 @@ def test_native_rejection_routes_through_reviewer_and_confirmation(tmp_path, mon
         as_node="update_regions",
     )
     result = graph.invoke(None, config)
-    if scenario in {"inferred", "scope"}:
+    if scenario in {"inferred", "user", "height"}:
         assert result["status"] == "success"
         assert not result.get("__interrupt__")
     else:
+        from langgraph.types import Command
+
         pause = result["__interrupt__"][0].value
-        assert pause["kind"] == "parameter_confirmation"
+        assert pause["kind"] == ("locked_parameter" if scenario == "locked" else "boundary_mapping")
         assert not any(operation == "repair" for operation, _ in calls)
-        if scenario == "height":
-            assert pause["unit"] == "mm" and pause["original_unit"] == "mm"
-        if scenario == "cancel":
-            result = api.resume_pipeline(run_dir=tmp_path, action="cancel")
-            assert result["status"] == "cancelled" and closed == ["numeric"]
-            assert not any(operation == "repair" for operation, _ in calls)
-            return
-        value = 4 if scenario == "manual" else 60 if scenario == "retry" else None
-        result = api.resume_pipeline(run_dir=tmp_path, action="approve", parameter_value=value)
-        if scenario == "retry":
-            assert result["status"] == "paused"
-            assert result["interrupt"]["original_value"] == 80
-            result = api.resume_pipeline(run_dir=tmp_path, action="approve")
+        kwargs = (
+            {"boundary_replacements": ["feed"]}
+            if scenario == "scope"
+            else {}
+        )
+        # The session-rebuild routing is covered separately. This native task
+        # double only models the already-created workflow steps.
+        monkeypatch.setattr(fluent, "rebuild_fluent", lambda state: Command(goto="apply_repair"))
+        result = api.resume_pipeline(run_dir=tmp_path, action="approve", **kwargs)
         assert result["status"] == "success"
         snapshot = graph.get_state(config).values
-        approval = snapshot["repair_history"][-1]["user_confirmation"]
-        assert approval["approved_value"] == (
-            4 if scenario == "manual" else 0.2 if scenario == "height" else 3
-        )
+        assert snapshot["repair_history"][-1]["application"]["controls"]
     assert job.raw["parameter_sources"]["boundary_layers"]["layers"] == layers["layers"]
     if scenario == "scope":
         assert tasks["boundary_layers"].complete_bl_label_list.get_state() == ["feed"]
@@ -517,7 +520,7 @@ def test_native_rejection_routes_through_reviewer_and_confirmation(tmp_path, mon
 
 
 def test_native_setter_failure_retains_attempted_controls(tmp_path):
-    from cfd_agent.workers.fluent_tasks import StepExecutionError
+    from src.workers.fluent_tasks import StepExecutionError
 
     runner, tasks = runner_at(tmp_path, job_at(tmp_path, global_size=length(-1)))
 
@@ -534,13 +537,13 @@ def test_native_setter_failure_retains_attempted_controls(tmp_path):
     assert error.value.observation["controls"]["global_size"] == -1
 
 
-@pytest.mark.parametrize("choice", ["accept", "manual", "cancel", "inferred"])
-def test_local_reference_repairs_preserve_numeric_authority(tmp_path, monkeypatch, choice):
-    from cfd_agent.nodes import confirmation, review
-    from cfd_agent.services import reviewer
-    from cfd_agent.services.contracts import RepairDecision
+def test_local_reference_repair_requires_confirmed_mapping_then_numeric_repair_is_automatic(
+    tmp_path, monkeypatch
+):
+    from src.services import reviewer
+    from src.services.contracts import RepairDecision
 
-    original_size = {**length(0.5, "cm"), "source": "inferred" if choice == "inferred" else "user"}
+    original_size = {**length(0.5, "cm"), "source": "user"}
     job = job_at(
         tmp_path,
         local_refinements=[{"target": "feed", "boundary_name": "old", "size": original_size}],
@@ -554,7 +557,12 @@ def test_local_reference_repairs_preserve_numeric_authority(tmp_path, monkeypatc
             operations.append(operation)
             if operation == "observe":
                 return {"controls": controls.snapshot()}
-            step, _ = controls.apply(data["action"], data["parameters"], {"middle", "feed"})
+            step, _ = controls.apply(
+                data["action"],
+                data["parameters"],
+                {"middle", "feed"},
+                manual_approved=bool(data.get("manual_approved")),
+            )
             return {"resume": step, "controls": controls.snapshot()}
 
     monkeypatch.setattr(reviewer, "get_client", lambda *args: Client())
@@ -583,41 +591,72 @@ def test_local_reference_repairs_preserve_numeric_authority(tmp_path, monkeypatc
         state.update(outcome.update)
         return outcome
 
-    for old, new in (("old", "middle"), ("middle", "feed")):
-        assert (
-            propose("replace_zone_reference", category="local_refinements", old=old, new=new).goto
-            == "local_sizing"
-        )
+    outcome = propose("replace_zone_reference", category="local_refinements", old="old", new="feed")
+    assert outcome.goto == "human_intervention"
+    state["repair_override"] = True
+    outcome = reviewer.execute_repair(state)
+    state.update(outcome.update)
+    assert outcome.goto == "local_sizing"
     assert controls.local_refinements[0]["source_boundary_name"] == "old"
     operations.clear()
     outcome = propose("set_local_size", zone="feed", value=10)
-    if choice == "inferred":
-        assert outcome.goto == "local_sizing"
-        assert controls.local_refinements[0]["size"] == 10
-    else:
-        assert outcome.goto == "parameter_confirmation"
-        assert operations == ["observe"]
-        assert controls.local_refinements[0]["size"] == 5
-        pause = state["parameter_confirmation"]
-        assert (pause["original_value"], pause["original_unit"], pause["unit"]) == (0.5, "cm", "mm")
-        assert pause["source"] == "user"
-        payload = {"action": "cancel" if choice == "cancel" else "approve"}
-        if choice == "manual":
-            payload["parameter_value"] = 12
-        monkeypatch.setattr(review, "interrupt", lambda value: payload)
-        closed = []
-        monkeypatch.setattr(confirmation, "close_client", closed.append)
-        resumed = review.parameter_confirmation(state)
-        if resumed.goto == "cancelled":
-            confirmation.cancelled({**state, **resumed.update})
-        assert resumed.goto == ("cancelled" if choice == "cancel" else "local_sizing")
-        assert (
-            controls.local_refinements[0]["size"]
-            == {"cancel": 5, "manual": 12, "accept": 10}[choice]
-        )
-        assert closed == (["local-size"] if choice == "cancel" else [])
-        if choice != "cancel":
-            assert (
-                resumed.update["repair_history"][-1]["user_confirmation"]["original_value"] == 0.5
-            )
+    assert outcome.goto == "local_sizing"
+    assert controls.local_refinements[0]["size"] == 10
+    assert operations == ["repair"]
     assert job.raw["parameter_sources"]["local_refinements"][0]["size"] == original_size
+
+
+def test_first_failed_local_sizing_child_is_not_hidden_by_a_later_child(tmp_path):
+    from src.workers.fluent_tasks import StepExecutionError
+
+    job = job_at(
+        tmp_path,
+        local_refinements=[
+            {"target": "feed", "boundary_name": "feed", "size": length(1)},
+            {"target": "exit", "boundary_name": "exit", "size": length(1)},
+        ],
+    )
+    runner, _ = runner_at(tmp_path, job)
+
+    class FailedLocal(Task):
+        def __call__(self):
+            self.calls += 1
+            return False
+
+    local_values = {
+        "boi_execution": "Face Size",
+        "boi_size": 1.0,
+        "boi_min_size": 0.5,
+        "boi_max_size": 1.0,
+        "boi_zoneor_label": "label",
+        "boi_face_label_list": [],
+        "draw_size_control": False,
+        "boi_growth_rate": 1.2,
+    }
+    first = FailedLocal(**local_values)
+    second = Task(**local_values)
+    runner._task_for_step = lambda step: Task(**local_values) if step == "local_sizing" else None
+    runner._tasks_with_display_prefix = lambda prefix: [first, second]
+
+    with pytest.raises(StepExecutionError, match="local sizing did not complete"):
+        runner._step_local_sizing()
+    assert first.calls == 1
+    assert second.calls == 0
+
+
+def test_final_boundary_check_requires_actual_names_and_types(tmp_path):
+    from src.workers.fluent_tasks import boundary_check
+
+    job = job_at(tmp_path)
+    current = {"inlet": ["feed"], "outlet": ["exit"], "wall": ["wall_a"], "symmetry": []}
+    result = boundary_check(
+        "",
+        job,
+        current,
+        actual_boundaries={"feed", "exit", "wall_a"},
+        actual_boundary_types={"feed": "wall", "exit": "pressure-outlet", "wall_a": "wall"},
+    )
+    assert not result["ok"]
+    assert result["type_mismatches"] == [
+        {"name": "feed", "expected": "velocity-inlet", "actual": "wall"}
+    ]

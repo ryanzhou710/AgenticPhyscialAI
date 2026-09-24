@@ -7,14 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from cfd_agent import api, cli
-from cfd_agent.adapters.fluent import FluentClient, FluentWorkerError
-from cfd_agent.config import RuntimeConfig
-from cfd_agent.services.artifacts import create_run_directory
+from src import api, cli
+from src.adapters.fluent import FluentClient, FluentWorkerError
+from src.config import RuntimeConfig
+from src.services.artifacts import create_run_directory
 
 
 def test_close_does_not_target_reused_or_unowned_pid(monkeypatch):
-    from cfd_agent.adapters import windows_process
+    from src.adapters import windows_process
 
     monkeypatch.setattr(windows_process, "process_creation_time", lambda pid: 999)
     result = windows_process.request_window_close({"process_id": 1, "process_creation_time": 111})
@@ -27,7 +27,7 @@ def client_with_program(tmp_path, monkeypatch, program, timeout=2):
     def local_worker(command, **kwargs):
         return original([sys.executable, "-u", "-c", program], **kwargs)
 
-    monkeypatch.setattr("cfd_agent.adapters.fluent.subprocess.Popen", local_worker)
+    monkeypatch.setattr("src.adapters.fluent.subprocess.Popen", local_worker)
     return FluentClient(tmp_path, RuntimeConfig(fluent_operation_timeout_s=timeout))
 
 
@@ -214,15 +214,13 @@ def test_cli_requires_prompt_file_and_rejects_inline_prompt(prompt_args):
 
 
 @pytest.mark.parametrize("answer,expected", [("accept", None), ("5", 5), ("cancel", "cancel")])
-def test_cli_parameter_confirmation_uses_same_process(monkeypatch, answer, expected):
+def test_cli_locked_parameter_intervention_resumes_with_explicit_value(monkeypatch, answer, expected):
     pause = {
-        "kind": "parameter_confirmation",
-        "parameter": "boundary_layers.layers",
-        "error": "native error",
-        "original_value": 80,
-        "proposed_value": 3,
-        "reason": "native correction",
-        "value_type": "integer",
+        "kind": "locked_parameter",
+        "message": "Locked control needs approval",
+        "failed_step": "boundary_layers",
+        "required_action": "approve or cancel",
+        "evidence": {"proposed_parameters": {"value": 3}},
     }
     calls = []
 
@@ -230,7 +228,7 @@ def test_cli_parameter_confirmation_uses_same_process(monkeypatch, answer, expec
         calls.append(kwargs)
         return {"status": "cancelled" if kwargs["action"] == "cancel" else "success"}
 
-    answers = iter(["later", "1.5", answer])
+    answers = iter([answer])
     monkeypatch.setattr("builtins.input", lambda message: next(answers))
     monkeypatch.setattr(cli, "resume_pipeline", resume)
     result = cli._interactive_resume(
@@ -241,21 +239,9 @@ def test_cli_parameter_confirmation_uses_same_process(monkeypatch, answer, expec
     assert calls[0].get("parameter_value") == (expected if isinstance(expected, int) else None)
 
 
-def test_parameter_resume_cannot_restart_a_lost_session(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
+def test_legacy_checkpoint_is_explicitly_rejected(tmp_path):
     (tmp_path / "run-metadata.json").write_text(
         json.dumps({"checkpoint": "unused", "run_id": "run"})
     )
-
-    class Graph:
-        def get_state(self, config):
-            return SimpleNamespace(next=("parameter_confirmation",))
-
-        def invoke(self, *args):
-            pytest.fail("must not resume without the original Fluent session")
-
-    monkeypatch.setattr(api, "build_graph", lambda path: Graph())
-    monkeypatch.setattr(api, "has_live_client", lambda run_id: False)
-    with pytest.raises(RuntimeError, match="original live Fluent session"):
+    with pytest.raises(ValueError, match="incompatible CFD Agent version"):
         api.resume_pipeline(run_dir=tmp_path, action="approve")

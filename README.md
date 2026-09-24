@@ -1,168 +1,151 @@
 # CFD Agent
 
-CFD Agent generates Fluent volume meshes from a SpaceClaim CAD file and a natural-language
-prompt. It supports a single connected internal fluid domain with arbitrary planar
-opening contours (including circular, rectangular, polygonal, and mixed-curve openings),
-with human confirmation before meshing. Flow solving is not included.
+CFD Agent converts one SpaceClaim CAD model and one UTF-8 natural-language request into a Fluent Watertight Geometry poly-hexcore volume mesh. It supports one connected internal fluid domain and arbitrary planar opening contours. It does not solve a flow field or create multiple fluid domains.
 
-The workflow uses LangGraph for orchestration, a language model for interpretation and
-failure diagnosis, SpaceClaim for fluid-domain extraction, and PyFluent for meshing.
-Meshing uses Fluent Watertight Geometry and poly-hexcore.
+The installed command remains `cfd-agent`; the Python package is now `src`:
 
-## Requirements
+```python
+from src import resume_pipeline, run_pipeline
+```
 
-- Windows; Python 3.12 is recommended (package metadata allows 3.11–3.13).
-- Ansys 2024 R1 (v241), including SpaceClaim, Fluent, and a valid Ansys license.
-- An existing `.scdoc` file and a nonempty UTF-8 prompt file.
-- Codex CLI installed if using Codex OAuth auto-login.
-- Either existing Codex OAuth credentials or an OpenAI API key, plus access to a compatible
-  image-capable model.
+The module entry point is `python -m src`.
 
-In OAuth mode, the usual credential location is `%USERPROFILE%\.codex\auth.json`. When the CFD
-Agent needs the model and cannot find a readable cache, it automatically runs `codex login` and
-opens the browser authorization flow. Complete the authorization in the browser; the workflow
-continues after Codex saves the credentials. To use device-code authentication instead, set
-`$env:FOAMAGENT_CODEX_DEVICE_AUTH = "1"` before starting the run. If Codex stores credentials
-in the OS keyring rather than `auth.json`, configure its credential store to `file`, or set
-`CODEX_HOME` / `FOAMAGENT_CODEX_AUTH_PATH` to a readable file-based cache.
+## Workflow
 
-OAuth caches contain access tokens and must never be committed to GitHub or copied into chat
-messages. API Key mode reads `OPENAI_API_KEY` from the environment and never stores the key in
-the run metadata or audit files.
-The default model is `gpt-5.6-luna`. `--model` selects another compatible model available
-through the selected authentication mode; it does not itself change the authentication mode.
+```text
+CAD + request
+→ LLM selects geometry and explains fluid-domain intent
+→ SpaceClaim extracts or reuses the fluid domain and labels groups
+→ fixed CAD review/edit/confirmation
+→ Fluent creates and validates the volume mesh
+→ mesh, logs, effective controls, and evidence are archived
+```
 
-## Quick start
+The LLM uses the current geometry catalog, supplied images, native-software observations, and repair history. Production code does not select behavior from filenames, fixed object IDs, predefined boundary names, or example-specific geometry rules. Failed examples belong in tests, not in a production whitelist.
 
-### 1. Install
+## Requirements and installation
 
-Open PowerShell in the project root:
+- Windows and Python 3.11–3.13; Python 3.12 is recommended.
+- Ansys 2024 R1 (`v241`) with SpaceClaim, Fluent, and a valid license for a real mesh run.
+- An existing `.scdoc` CAD file and a nonempty UTF-8 request file.
+- Codex OAuth credentials or `OPENAI_API_KEY`, with access to a compatible image-capable model.
+
+Use a project-local environment so imports cannot resolve to an older checkout:
 
 ```powershell
 py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 $env:AWP_ROOT241 = "C:\Program Files\ANSYS Inc\v241"
 ```
 
-Replace the Ansys path if necessary, or use `--ansys-root` when starting a run.
-Python dependencies are installed automatically; Ansys and model credentials are separate.
+The editable install creates `.\.venv\Scripts\cfd-agent.exe`. Build a wheel for a separate clean environment with:
 
-### 2. Prepare a prompt
-
-Save a UTF-8 file such as `C:\CFD-inputs\prompt.txt`. Replace the placeholders for your CAD:
-
-```text
-Use [reference view] as the directional reference.
-Select [opening locations or features] and [the seed face on the inner fluid wall].
-Assign [opening name] as an inlet and [opening name] as an outlet.
-Treat the remaining fluid boundary as a wall.
-Optional: [global size, local refinement, boundary-layer settings, and length units].
+```powershell
+.\.venv\Scripts\python.exe -m pip wheel . --wheel-dir dist
 ```
 
-Specify a reference view when using directions such as left or right.
+## Inputs and run
 
-The workflow runs volume extraction by default. It skips extraction only when the Prompt
-explicitly states that the supplied CAD is already the fluid domain and SpaceClaim confirms
-one closed, positive-volume solid body with no free edges. In that case it uses the existing
-body as the fluid domain and groups the selected inlet/outlet faces directly. Sheet bodies,
-multiple bodies, and any body with a free edge cannot be reused as an existing fluid domain.
-A planar face or a closed loop can represent an opening; a loop may contain multiple line,
-arc, spline, or mixed-curve edges.
+Create an input directory you control, for example `C:\CFD-inputs\`. Put the CAD at `C:\CFD-inputs\duct.scdoc` and write `C:\CFD-inputs\prompt.txt` in UTF-8:
 
-### 3. Run
+```text
+Use Front as the directional reference. Extract the internal fluid volume.
+The left circular opening is inlet_in; the right rectangular opening is outlet_out.
+Use the long inner duct face as the extraction seed. Treat remaining faces as walls.
+Use a 4 mm global size and three boundary layers on the wall.
+```
 
-Choose one of the following authentication modes. OAuth is the default, so the first example
-works without adding an authentication argument.
-
-#### Option A: Codex OAuth (default)
-
-If a readable OAuth cache is not available, the agent runs `codex login` and opens the browser
-authorization flow. Complete the authorization once, then the workflow continues.
+Run with Codex OAuth:
 
 ```powershell
 .\.venv\Scripts\cfd-agent.exe run `
-  --geometry "cfd inputs\no-panel-b.scdoc" `
-  --prompt-file "cfd inputs\prompt.txt" `
+  --geometry "C:\CFD-inputs\duct.scdoc" `
+  --prompt-file "C:\CFD-inputs\prompt.txt" `
   --ui-mode gui `
   --keep-open
 ```
 
-The same mode can be selected explicitly with `--auth-mode codex_oauth`.
-
-#### Option B: OpenAI API Key
-
-Set the API key in the current PowerShell session, then select `api_key`. The key is not passed as
-a command-line argument and is not stored in the run metadata or audit files.
+For an API key, set it in the current shell and add `--auth-mode api_key`:
 
 ```powershell
 $env:OPENAI_API_KEY = "sk-..."
 .\.venv\Scripts\cfd-agent.exe run `
   --auth-mode api_key `
-  --geometry "cfd inputs\no-panel-b.scdoc" `
-  --prompt-file "cfd inputs\prompt.txt" `
-  --ui-mode gui `
-  --keep-open
+  --geometry "C:\CFD-inputs\duct.scdoc" `
+  --prompt-file "C:\CFD-inputs\prompt.txt"
 ```
 
-Do not put the key directly in source code, commit it to Git, or paste it into chat. API Key mode
-uses the standard OpenAI Responses API endpoint. The selected model must be available to the
-OpenAI Platform project associated with the key. API Key requests use OpenAI Platform billing,
-separate from ChatGPT subscription credits.
+Use `--ansys-root` instead of `AWP_ROOT241` when necessary. The default mode is `hidden`; GUI mode is required by `--keep-open`. With `--keep-open`, Fluent remains open after a successful run and the CLI waits until its window closes. Without it, success, cancellation, exceptions, and CAD-revision pauses close the run-owned Fluent session.
 
-In PowerShell, each continuation backtick must be the last character on its line. The `>>` prompt
-is PowerShell's continuation prompt and should not be copied into the command.
+## Fluid-domain choice and fixed CAD handoff
 
-Use `run --help` to see all options. The default UI mode is `hidden`, which still requires
-terminal confirmation. `--keep-open` requires `--ui-mode gui`.
+The selection response includes `fluid_domain_action` and evidence from the request. If the request does not clearly say that the CAD is already a fluid domain, the agent extracts one. Reuse still requires exactly one positive-volume closed solid without free edges. Ambiguous intent pauses for a clarification.
 
-## Confirmation and resume
+Every normal run pauses after SpaceClaim creates the working copy and boundary groups:
 
-At the CAD pause, inspect or edit the working copy shown in the terminal.
+1. The CLI shows the working CAD path and proposed boundary roles.
+2. Review or edit that working copy in SpaceClaim.
+3. Enter `yes` to save, reread its actual geometry and groups, and continue; enter `no` to cancel.
+4. Fluent receives a new task built from the saved CAD and confirmed groups.
 
-- `yes`: in GUI mode, save unsaved changes in the original editing session, then reread
-  the saved groups and continue if the handoff succeeds. Hidden mode uses the saved file.
-- `no`: cancel without requesting a save; the SpaceClaim editing window stays open.
+If group names or roles changed, save the CAD and supply roles through the Python API:
 
-Keep existing group names when using the CLI: new or renamed groups with unknown roles
-stop the handoff. For these groups, Python callers must first save the CAD, then supply
-their roles through `cfd_agent.resume_pipeline` using `boundary_roles` and `action="approve"`.
+```python
+from src import resume_pipeline
 
-Failures can trigger limited repair attempts. Numeric repairs to parameters identified
-by the model as user-specified require confirmation: enter `accept`, a replacement value
-in the displayed unit, or `cancel`. Layer counts require integers.
-Complete parameter confirmation in the original process; it needs the live Fluent session.
+outcome = resume_pipeline(
+    run_dir=r"C:\path\to\runs\20260924-120000-ab12cd34",
+    action="approve",
+    boundary_roles={"inlet_in": "inlet", "outlet_out": "outlet", "wall": "wall"},
+)
+```
 
-With `--keep-open`, press Enter at the final terminal prompt to close the retained Fluent
-session. Close SpaceClaim separately. Cancellation closes the run's Fluent session.
+## Automated repairs and human intervention
 
-If the terminal was closed at a CAD confirmation pause, keep the original SpaceClaim
-editing session open and resume using the same code version:
+Each input version has at most 10 automatic repair rounds by default (`--max-repair-rounds`), and the full run has a hard cumulative limit of 100. Two consecutive failures with the same error, action, and parameters are no progress. Editing CAD or providing a clarification starts a new per-input budget; merely continuing does not.
 
-Replace `YOUR-RUN-ID` with the name of the relevant folder under `runs`, then run:
+Ordinary numeric corrections, including stated sizes and layer controls, run automatically when Fluent evidence supports the change. A value pauses only when the request explicitly marks that exact control as unchangeable. Existing quality criteria are never relaxed.
+
+A pause includes the failed step, native evidence, attempted repairs, why automatic work stopped, and a concrete next action:
+
+| Trigger | Required action |
+|---|---|
+| Opening, seed face, or fluid-domain intent is not unique | Clarify the request or choose the intended object. |
+| Confirmed geometry or boundary purpose must change | Edit the working CAD and repeat CAD confirmation. |
+| A label cannot be proved to identify the confirmed physical surface, or roles conflict | Supply the exact Fluent label mapping. |
+| A locked numeric control needs a change | Approve the proposed value, provide a replacement, or cancel. |
+| Repair budget exhausted or no progress, with a concrete CAD remedy | Revise the CAD/request and confirm again. |
+
+Session loss, unsupported operations, and code defects fail with their evidence; the CLI does not ask to ignore them. Mapping changes are checked against Fluent's actual boundary names and types. Name similarity alone never proves a physical-surface correspondence.
+
+In a noninteractive terminal, the workflow writes `pause.json` and returns `paused`. Resume a pending run in the same code version:
 
 ```powershell
-.\.venv\Scripts\cfd-agent.exe resume --run-dir ".\runs\YOUR-RUN-ID"
+.\.venv\Scripts\cfd-agent.exe resume --run-dir "C:\path\to\runs\20260924-120000-ab12cd34"
 ```
 
-This command resumes pending CAD confirmation, not parameter confirmation or failed runs.
+`resume_pipeline` also accepts `clarification`, `parameter_value`, `boundary_replacement`, and `boundary_replacements` for structured interventions. Older run formats are rejected explicitly; use their original version or start a new run.
 
-## Results and limitations
+## Results and validation
 
-Outputs are created under `runs/<run-id>/` in the current working directory, or the
-directory selected with `--output`.
+Each run directory contains:
 
-| File | Contents |
+| Path | Contents |
 |---|---|
-| `artifacts/confirmed.scdoc` | Saved CAD copied at the confirmation handoff |
-| `artifacts/mesh.msh.h5` | Mesh copied after successful validation |
-| `result.json` | Outcome and available details; fields vary for success, failure, and cancellation |
+| `prompt.txt` | Original request. |
+| `artifacts/confirmed.scdoc` | CAD saved at the handoff. |
+| `artifacts/mesh.msh.h5` | Mesh after Fluent write/readback validation. |
+| `artifacts/success-runtime/` or `failure-runtime/` | Worker logs, transcripts, validation logs, images, controls, and runtime evidence. |
+| `result.json` | Requested and final controls, confirmed mapping, actual Fluent boundary types, quality checks, repair history, and outcome. |
+| `state/` and `latest-state.json` | Durable step-by-step state. |
 
-Mesh checks cover quality metrics, negative volumes, execution-label presence, and file
-save/readback. They do not establish physical validity or independently verify that
-repaired inlet/outlet assignments preserve the confirmed roles. Review the final mesh.
+Final validation reads Fluent's actual boundary names and types, checks them against the final mapping, checks mesh quality and negative-volume evidence, and performs mesh readback. Native SpaceClaim and Fluent integration tests require an available installation, license, credentials, and suitable CAD input; unit-test doubles do not constitute a real software run.
 
-For failures, inspect terminal messages and available run logs. Early startup errors may
-occur before `result.json` exists.
+## Development checks
 
-Prompts, geometry attributes, and images are sent to the model service. Keep credentials,
-private CAD, and generated run data out of public commits.
+```powershell
+$env:PYTHONPATH = "."
+.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m ruff check .
+```

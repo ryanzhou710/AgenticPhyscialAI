@@ -6,10 +6,11 @@ from types import SimpleNamespace
 import pytest
 from langgraph.types import Command
 
-from cfd_agent import api, cli
-from cfd_agent.adapters import fluent as transport
-from cfd_agent.adapters import spaceclaim_build
-from cfd_agent.services.terminal import progress_node
+from src import api, cli
+from src.adapters import fluent as transport
+from src.adapters import spaceclaim_build
+from src.services.artifacts import RUN_FORMAT_VERSION
+from src.services.terminal import progress_node
 
 
 def paused(tmp_path):
@@ -17,6 +18,8 @@ def paused(tmp_path):
         "status": "paused",
         "run_dir": str(tmp_path),
         "interrupt": {
+            "kind": "cad_confirmation",
+            "message": "Review CAD",
             "working_geometry": str(tmp_path / "working.scdoc"),
         },
     }
@@ -65,7 +68,11 @@ def test_yes_saves_before_resume_and_has_no_role_questions(monkeypatch, tmp_path
 @pytest.mark.parametrize("keep_open", [False, True])
 def test_handoff_failure_stops_without_resume(monkeypatch, tmp_path, capsys, message, keep_open):
     checkpoint = tmp_path / "checkpoints.sqlite"
-    metadata = {"checkpoint": str(checkpoint), "run_id": "handoff-test"}
+    metadata = {
+        "checkpoint": str(checkpoint),
+        "run_id": "handoff-test",
+        "run_format_version": RUN_FORMAT_VERSION,
+    }
     (tmp_path / "run-metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
     closed = []
     client = SimpleNamespace(_broken=False, process=SimpleNamespace(poll=lambda: None))
@@ -119,19 +126,20 @@ def test_handoff_failure_stops_without_resume(monkeypatch, tmp_path, capsys, mes
 
 
 def test_summary_printed_before_keep_open_wait(monkeypatch, tmp_path, capsys):
-    def wait(prompt):
+    def wait():
         output = capsys.readouterr().out
         assert "Overall status: Success" in output
         assert "mesh.msh.h5" in output
         assert "Diagnosis rounds: 2" in output
-        return ""
+        return False
 
     closed = []
-    monkeypatch.setattr("builtins.input", wait)
+    monkeypatch.setattr(cli, "has_live_client", lambda run_id: wait())
     monkeypatch.setattr(cli, "close_run_sessions", lambda root: closed.append(root))
     cli._interactive_resume(
         {
             "status": "success",
+            "run_id": "kept-open",
             "run_dir": str(tmp_path),
             "fluent_session_open": True,
             "result": {"mesh": "mesh.msh.h5", "repair_rounds": 2},
@@ -176,7 +184,7 @@ def test_failed_terminal_node_never_says_complete(capsys):
 
 
 def test_inspect_saves_before_fresh_read_and_reuses_roles(monkeypatch, tmp_path):
-    from cfd_agent.services.geometry_models import GeometryCatalog
+    from src.services.geometry_models import GeometryCatalog
 
     catalog = GeometryCatalog.model_construct(
         native_catalog={
@@ -196,7 +204,9 @@ def test_inspect_saves_before_fresh_read_and_reuses_roles(monkeypatch, tmp_path)
         "boundary_roles": {"in": "inlet", "out": "outlet"},
     }
     (tmp_path / "run-metadata.json").write_text(
-        json.dumps({"checkpoint": "unused", "run_id": "run"})
+        json.dumps(
+            {"checkpoint": "unused", "run_id": "run", "run_format_version": RUN_FORMAT_VERSION}
+        )
     )
     monkeypatch.setattr(
         api,
@@ -273,7 +283,12 @@ def test_save_timeout_sends_only_one_request(monkeypatch, tmp_path):
 
 def test_checkpoint_resume_reads_actual_interrupt_and_no_ends_graph(tmp_path):
     checkpoint = tmp_path / "checkpoints.sqlite"
-    metadata = {"checkpoint": str(checkpoint), "run_id": "pause-test", "max_repair_rounds": 10}
+    metadata = {
+        "checkpoint": str(checkpoint),
+        "run_id": "pause-test",
+        "max_repair_rounds": 10,
+        "run_format_version": RUN_FORMAT_VERSION,
+    }
     (tmp_path / "run-metadata.json").write_text(json.dumps(metadata))
     graph = api.build_graph(checkpoint)
     config = {"configurable": {"thread_id": metadata["run_id"]}}
@@ -304,7 +319,9 @@ def test_checkpoint_resume_reads_actual_interrupt_and_no_ends_graph(tmp_path):
 def test_confirmation_save_failure_never_opens_disk_copy(monkeypatch, tmp_path, ui_mode):
     state = {"working_geometry": "working.scdoc", "ui_mode": ui_mode, "labeling": {}}
     (tmp_path / "run-metadata.json").write_text(
-        json.dumps({"checkpoint": "unused", "run_id": "run"})
+        json.dumps(
+            {"checkpoint": "unused", "run_id": "run", "run_format_version": RUN_FORMAT_VERSION}
+        )
     )
     monkeypatch.setattr(
         api,
