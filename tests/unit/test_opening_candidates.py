@@ -1,6 +1,6 @@
 """Opening topology candidates exposed to the CAD grounding model."""
 
-from cfd_agent.nodes.cad import _is_existing_fluid_body
+from cfd_agent.nodes.cad import _is_existing_fluid_body, _prompt_explicitly_declares_fluid_body
 from cfd_agent.services.geometry_models import GeometryCatalog
 from cfd_agent.services.grounding import _opening_candidate_context
 
@@ -38,7 +38,7 @@ def test_opening_context_exposes_planar_faces_and_closed_arbitrary_loops():
     assert "arbitrary opening" in context["selection_guidance"]
 
 
-def test_closed_positive_volume_body_can_skip_volume_extract():
+def test_closed_positive_volume_body_is_eligible_for_explicit_reuse():
     catalog = GeometryCatalog(
         catalog_id="catalog",
         geometry_id="geometry",
@@ -106,7 +106,67 @@ def test_multiple_bodies_cannot_skip_volume_extract():
     assert not _is_existing_fluid_body(catalog)
 
 
-def test_cad_node_uses_topology_not_prompt_to_select_direct_mode(tmp_path, monkeypatch):
+def test_volume_extraction_is_the_default_when_prompt_is_silent():
+    assert not _prompt_explicitly_declares_fluid_body("Select the left inlet and right outlet.")
+
+
+def test_existing_fluid_body_requires_an_explicit_prompt_statement():
+    assert _prompt_explicitly_declares_fluid_body(
+        "The input is already the fluid domain; keep its existing volume."
+    )
+
+
+def test_cad_node_uses_volume_extract_for_a_silent_closed_body(tmp_path, monkeypatch):
+    from cfd_agent.nodes import cad
+
+    catalog = GeometryCatalog(
+        catalog_id="catalog",
+        geometry_id="geometry",
+        bodies=[
+            {
+                "id": "B1",
+                "kind": "body",
+                "solid_or_sheet": "solid",
+                "volume_m3": 1.0,
+                "edge_ids": ["E1"],
+            }
+        ],
+        edges=[
+            {"id": "E1", "kind": "edge", "body_id": "B1", "face_ids": ["F1", "F2"]},
+        ],
+        native_catalog={"public": {}, "internal": {}},
+    )
+    direct_flags = []
+
+    class Builder:
+        def __init__(self, **kwargs):
+            pass
+
+        def extract_volume(self, **kwargs):
+            direct_flags.append(kwargs["existing_fluid_body"])
+            return {"transfer": {"source_mode": "volume_extract"}}
+
+    monkeypatch.setattr(cad, "SpaceClaimBuildAdapter", Builder)
+    (tmp_path / "state").mkdir()
+    result = cad.extract_volume(
+        {
+            "runtime_dir": str(tmp_path),
+            "run_dir": str(tmp_path),
+            "ui_mode": "hidden",
+            "runtime_config": {},
+            "prompt": "Select the left inlet and right outlet.",
+            "working_geometry": str(tmp_path / "original.scdoc"),
+            "catalog": catalog.model_dump(mode="json"),
+            "selection_plan": {"openings": []},
+        }
+    )
+
+    assert not result["error"]
+    assert result["fluid_volume_mode"] == "volume_extract"
+    assert direct_flags == [False]
+
+
+def test_cad_node_reuses_only_an_explicitly_declared_fluid_body(tmp_path, monkeypatch):
     from cfd_agent.nodes import cad
 
     catalog = GeometryCatalog(
@@ -144,7 +204,7 @@ def test_cad_node_uses_topology_not_prompt_to_select_direct_mode(tmp_path, monke
             "run_dir": str(tmp_path),
             "ui_mode": "hidden",
             "runtime_config": {},
-            "prompt": "Select the left inlet and right outlet.",
+            "prompt": "The input is already the fluid domain; keep its existing volume.",
             "working_geometry": str(tmp_path / "original.scdoc"),
             "catalog": catalog.model_dump(mode="json"),
             "selection_plan": {"openings": []},
@@ -154,3 +214,39 @@ def test_cad_node_uses_topology_not_prompt_to_select_direct_mode(tmp_path, monke
     assert not result["error"]
     assert result["fluid_volume_mode"] == "existing_fluid_body"
     assert direct_flags == [True]
+
+
+def test_explicit_fluid_declaration_with_invalid_topology_routes_to_reviewer(
+    tmp_path, monkeypatch
+):
+    from cfd_agent.nodes import cad
+
+    catalog = GeometryCatalog(
+        catalog_id="catalog",
+        geometry_id="geometry",
+        bodies=[{"id": "B1", "kind": "body", "solid_or_sheet": "sheet", "volume_m3": 0.0}],
+        native_catalog={"public": {}, "internal": {}},
+    )
+
+    monkeypatch.setattr(
+        cad,
+        "SpaceClaimBuildAdapter",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("adapter must not run")),
+    )
+    (tmp_path / "state").mkdir()
+    result = cad.extract_volume(
+        {
+            "runtime_dir": str(tmp_path),
+            "run_dir": str(tmp_path),
+            "ui_mode": "hidden",
+            "runtime_config": {},
+            "prompt": "The input is already the fluid domain.",
+            "working_geometry": str(tmp_path / "original.scdoc"),
+            "catalog": catalog.model_dump(mode="json"),
+            "selection_plan": {"openings": []},
+        }
+    )
+
+    assert result["status"] == "repair_pending"
+    assert result["failed_step"] == "extract_volume"
+    assert "declares that the CAD is already a fluid domain" in result["error"]

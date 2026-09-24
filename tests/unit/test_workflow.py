@@ -73,6 +73,55 @@ def test_zero_repair_budget_stops_without_calling_model(tmp_path: Path):
     }
     result = review_failure(state)
     assert result["repair_decision"]["action"] == "stop"
+    assert result["repair_decision_source"] == "system"
+    assert result["repair_stop_reason"] == "repair_budget_exhausted"
+
+
+def test_llm_requested_stop_records_its_decision_source(tmp_path: Path, monkeypatch):
+    from cfd_agent.services import reviewer
+
+    class Client:
+        def invoke(self, **kwargs):
+            return RepairDecision(
+                action="stop",
+                target_step="query_geometry",
+                diagnosis="Need a clearer CAD direction.",
+                evidence="The requested direction is ambiguous.",
+            )
+
+    monkeypatch.setattr(reviewer.GroundingLLMClient, "from_runtime_config", lambda **kwargs: Client())
+    result = reviewer.diagnose_failure(
+        {
+            "run_id": "llm-stop",
+            "run_dir": str(tmp_path),
+            "runtime_dir": str(tmp_path),
+            "max_repair_rounds": 1,
+            "repair_rounds": 0,
+            "failed_step": "query_geometry",
+            "error": "ambiguous direction",
+        }
+    )
+
+    assert result["repair_decision_source"] == "llm"
+    assert result["repair_stop_reason"] == "llm_requested_stop"
+
+
+def test_failed_result_keeps_compatibility_with_old_state_without_stop_fields(tmp_path: Path):
+    from cfd_agent.nodes.results import failed
+
+    result = failed(
+        {
+            "run_id": "old-state",
+            "run_dir": str(tmp_path),
+            "runtime_dir": str(tmp_path),
+            "keep_open": True,
+            "failed_step": "extract_volume",
+            "error": "legacy failure",
+        }
+    )
+
+    assert result["result"]["repair_decision_source"] == "unknown"
+    assert result["result"]["repair_stop_reason"] == ""
 
 
 def test_fluent_repair_reports_earliest_invalidated_step(tmp_path: Path):

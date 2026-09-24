@@ -61,12 +61,13 @@ Optional: [global size, local refinement, boundary-layer settings, and length un
 
 Specify a reference view when using directions such as left or right.
 
-The workflow automatically skips volume extraction only when SpaceClaim reports one closed,
-positive-volume solid body with no free edges. In that case it uses the existing body as the
-fluid domain and groups the selected inlet/outlet faces directly. Sheet bodies, multiple
-bodies, and any body with a free edge continue through fluid-volume extraction. A planar face
-or a closed loop can represent an opening; a loop may contain multiple line, arc, spline, or
-mixed-curve edges. The prompt helps select boundaries but never overrides the topology check.
+The workflow runs volume extraction by default. It skips extraction only when the Prompt
+explicitly states that the supplied CAD is already the fluid domain and SpaceClaim confirms
+one closed, positive-volume solid body with no free edges. In that case it uses the existing
+body as the fluid domain and groups the selected inlet/outlet faces directly. Sheet bodies,
+multiple bodies, and any body with a free edge cannot be reused as an existing fluid domain.
+A planar face or a closed loop can represent an opening; a loop may contain multiple line,
+arc, spline, or mixed-curve edges.
 
 ### 3. Run
 

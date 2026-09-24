@@ -17,21 +17,39 @@ from cfd_agent.state import PipelineState
 
 
 def _is_existing_fluid_body(catalog: GeometryCatalog) -> bool:
-    """Return whether the input already contains one closed positive-volume body.
-
-    A closed solid body can be sent directly to boundary grouping and meshing;
-    sheet bodies or bodies with free edges still need volume extraction.
-    """
+    """Return whether topology permits reuse of one declared fluid body."""
     if len(catalog.bodies) != 1:
         return False
     body = catalog.bodies[0]
     if body.solid_or_sheet != "solid" or (body.volume_m3 or 0.0) <= 0.0:
         return False
-    edges = {edge.id: edge for edge in catalog.edges}
-    return all(
-        edge_id in edges and len(edges[edge_id].face_ids) == 2
-        for edge_id in body.edge_ids
+    edges = [edge for edge in catalog.edges if edge.body_id == body.id]
+    return bool(edges) and all(len(edge.face_ids) == 2 for edge in edges)
+
+
+def _prompt_explicitly_declares_fluid_body(prompt: str) -> bool:
+    """Return true only when the user explicitly identifies the CAD as fluid."""
+
+    text = " ".join(prompt.casefold().split())
+    phrases = (
+        "already the fluid domain",
+        "already a fluid domain",
+        "existing fluid domain",
+        "existing fluid body",
+        "input is the fluid domain",
+        "input is a fluid domain",
+        "input is already fluid",
+        "geometry is already fluid",
+        "输入就是流体域",
+        "输入为流体域",
+        "已有流体域",
+        "已经是流体域",
+        "无需体积抽取",
+        "跳过体积抽取",
+        "skip volume extract",
+        "skip volume extraction",
     )
+    return any(phrase in text for phrase in phrases)
 
 
 def prepare(state: PipelineState) -> dict[str, Any]:
@@ -155,10 +173,17 @@ def extract_volume(state: PipelineState) -> dict[str, Any]:
     try:
         output = Path(state["runtime_dir"]) / "extracted.scdoc"
         catalog = GeometryCatalog.model_validate(state["catalog"])
-        # The model selects boundary candidates, but it cannot decide whether
-        # the input is a reusable fluid body.  That decision is based on the
-        # SpaceClaim topology catalog: one solid, positive volume, no free edge.
-        existing_fluid_body = _is_existing_fluid_body(catalog)
+        declared_fluid_body = _prompt_explicitly_declares_fluid_body(state.get("prompt", ""))
+        reusable_fluid_body = _is_existing_fluid_body(catalog)
+        if declared_fluid_body and not reusable_fluid_body:
+            raise ValueError(
+                "Prompt declares that the CAD is already a fluid domain, but the topology "
+                "is not one closed positive-volume solid body without free edges"
+            )
+        # A closed body only proves that it can be reused. User intent decides
+        # whether it represents fluid; otherwise Volume Extract remains the
+        # default path.
+        existing_fluid_body = declared_fluid_body and reusable_fluid_body
         adapter = SpaceClaimBuildAdapter(
             runtime_dir=state["runtime_dir"],
             ui_mode=state["ui_mode"],
