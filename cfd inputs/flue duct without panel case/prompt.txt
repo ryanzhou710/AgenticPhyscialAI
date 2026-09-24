@@ -1,0 +1,5 @@
+Use front view as the directional reference.
+Select the circular opening on the left end and the rectangular opening on the right end of the internal fluid domain.
+Assign the left circular opening as inlet and the right rectangular opening as outlet.
+Treat the remaining fluid boundary as a wall.
+Global mesh size: 10mm. Length unit: mm.

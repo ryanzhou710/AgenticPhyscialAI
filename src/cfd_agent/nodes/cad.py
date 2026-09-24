@@ -22,38 +22,16 @@ def _is_existing_fluid_body(catalog: GeometryCatalog) -> bool:
     A closed solid body can be sent directly to boundary grouping and meshing;
     sheet bodies or bodies with free edges still need volume extraction.
     """
-    positive = [
-        body
-        for body in catalog.bodies
-        if body.solid_or_sheet == "solid" and (body.volume_m3 or 0.0) > 0.0
-    ]
-    if len(positive) != 1:
+    if len(catalog.bodies) != 1:
         return False
-    body_id = positive[0].id
-    body_edges = [edge for edge in catalog.edges if edge.body_id == body_id]
-    return bool(body_edges) and all(len(edge.face_ids) == 2 for edge in body_edges)
-
-
-def _prompt_explicitly_declares_fluid_body(prompt: str) -> bool:
-    """Return true only when the user explicitly says the input is fluid volume."""
-    text = " ".join(prompt.casefold().split())
-    phrases = (
-        "already the fluid domain",
-        "already a fluid domain",
-        "existing fluid domain",
-        "existing fluid body",
-        "input is the fluid domain",
-        "input is a fluid domain",
-        "输入就是流体域",
-        "输入为流体域",
-        "已有流体域",
-        "已经是流体域",
-        "无需体积抽取",
-        "跳过体积抽取",
-        "skip volume extract",
-        "skip volume extraction",
+    body = catalog.bodies[0]
+    if body.solid_or_sheet != "solid" or (body.volume_m3 or 0.0) <= 0.0:
+        return False
+    edges = {edge.id: edge for edge in catalog.edges}
+    return all(
+        edge_id in edges and len(edges[edge_id].face_ids) == 2
+        for edge_id in body.edge_ids
     )
-    return any(phrase in text for phrase in phrases)
 
 
 def prepare(state: PipelineState) -> dict[str, Any]:
@@ -177,7 +155,10 @@ def extract_volume(state: PipelineState) -> dict[str, Any]:
     try:
         output = Path(state["runtime_dir"]) / "extracted.scdoc"
         catalog = GeometryCatalog.model_validate(state["catalog"])
-        existing_fluid_body = _prompt_explicitly_declares_fluid_body(state.get("prompt", ""))
+        # The model selects boundary candidates, but it cannot decide whether
+        # the input is a reusable fluid body.  That decision is based on the
+        # SpaceClaim topology catalog: one solid, positive volume, no free edge.
+        existing_fluid_body = _is_existing_fluid_body(catalog)
         adapter = SpaceClaimBuildAdapter(
             runtime_dir=state["runtime_dir"],
             ui_mode=state["ui_mode"],

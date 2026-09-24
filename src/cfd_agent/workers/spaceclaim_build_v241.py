@@ -199,14 +199,19 @@ try:
             if body.get("kind") == "solid" and (body.get("volume_m3") or 0.0) > 0.0
         ]
         if build_request.get("existing_fluid_body"):
-            if len(positive_bodies) != 1:
-                raise ValueError("Existing-fluid-body mode requires exactly one solid body")
+            all_bodies = list(DocumentHelper.GetRootPart().GetAllBodies())
+            if len(all_bodies) != 1 or len(positive_bodies) != 1:
+                raise ValueError(
+                    "Existing-fluid-body mode requires exactly one positive-volume solid body")
             fluid = LIVE_OBJECTS[positive_bodies[0]["id"]]
             seed_face = LIVE_OBJECTS[plan["seed_inner_wall_id"]]
+            if seed_face.Parent != fluid:
+                raise ValueError("The selected seed face is not on the existing fluid body")
             seed_center = MeasureHelper.GetCentroid(Selection.Create(seed_face))
             seed_point = seed_face.Shape.Geometry.ProjectPoint(seed_center).Point
             free_edges = [
                 edge["id"] for edge in catalog["public"]["edges"]
+                if edge.get("body_id") == positive_bodies[0]["id"]
                 if len(edge["face_ids"]) != 2
             ]
             if free_edges:

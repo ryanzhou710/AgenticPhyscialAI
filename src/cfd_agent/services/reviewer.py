@@ -123,6 +123,8 @@ def diagnose_failure(state: PipelineState) -> dict[str, Any]:
                     "evidence": state["error"],
                     "parameters": {},
                 },
+                "repair_decision_source": "system",
+                "repair_stop_reason": "fluent_session_lost",
             },
         )
     if state.get("repair_rounds", 0) >= state["max_repair_rounds"]:
@@ -137,6 +139,8 @@ def diagnose_failure(state: PipelineState) -> dict[str, Any]:
                     "evidence": state["error"],
                     "parameters": {},
                 },
+                "repair_decision_source": "system",
+                "repair_stop_reason": "repair_budget_exhausted",
             },
         )
     try:
@@ -206,6 +210,10 @@ def diagnose_failure(state: PipelineState) -> dict[str, Any]:
             {
                 "repair_rounds": rounds,
                 "repair_decision": decision.model_dump(mode="json"),
+                "repair_decision_source": "llm",
+                "repair_stop_reason": (
+                    "llm_requested_stop" if decision.action == "stop" else ""
+                ),
                 "repair_history": history,
             },
         )
@@ -221,6 +229,8 @@ def diagnose_failure(state: PipelineState) -> dict[str, Any]:
                     "evidence": f"{type(error).__name__}: {error}",
                     "parameters": {},
                 },
+                "repair_decision_source": "system",
+                "repair_stop_reason": "reviewer_exception",
             },
         )
 

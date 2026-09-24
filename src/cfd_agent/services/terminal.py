@@ -45,6 +45,15 @@ def progress_node(stage, operation):
             decision = update.get("repair_decision", {})
             if decision.get("action") == "stop":
                 print("[Failed] Diagnosis: " + brief(decision.get("diagnosis")), flush=True)
+                source = update.get(
+                    "repair_decision_source", state.get("repair_decision_source", "unknown")
+                )
+                reason = update.get(
+                    "repair_stop_reason", state.get("repair_stop_reason", "")
+                )
+                print("  Decision source: " + brief(source), flush=True)
+                if reason:
+                    print("  Stop reason: " + brief(reason), flush=True)
                 if decision.get("diagnosis") == "Reviewer failed":
                     print("  " + brief(decision.get("evidence")), flush=True)
             else:
