@@ -12,8 +12,9 @@ from src.adapters.spaceclaim import SpaceClaimRunner
 from src.adapters.spaceclaim_build import SpaceClaimBuildAdapter
 from src.config import RuntimeConfig, config_from_state
 from src.graph import build_graph as _build_graph
-from src.services.artifacts import RUN_FORMAT_VERSION, create_run_directory, load_json, write_json
-from src.services.boundaries import confirm_roles, named_groups
+from src.services.artifacts import create_run_directory, load_json, write_json
+from src.services.boundaries import confirm_roles, named_groups, validate_confirmed_cad
+from src.services.errors import make_error_detail
 from src.services.execution import _persist
 
 
@@ -31,7 +32,6 @@ def _outcome(result: dict[str, Any], run_dir: Path) -> dict[str, Any]:
             "interrupt": interrupts[0].value,
             "repair_rounds": result.get("repair_rounds", 0),
             "total_repair_rounds": result.get("total_repair_rounds", 0),
-            "input_version": result.get("input_version", 0),
         }
         write_json(run_dir / "pause.json", pause)
         return pause
@@ -43,7 +43,6 @@ def _outcome(result: dict[str, Any], run_dir: Path) -> dict[str, Any]:
         "fluent_session_open": has_live_client(result["run_id"]),
         "repair_rounds": result.get("repair_rounds", 0),
         "total_repair_rounds": result.get("total_repair_rounds", 0),
-        "input_version": result.get("input_version", 0),
     }
 
 
@@ -85,7 +84,6 @@ def run_pipeline(
     (run_dir / "prompt.txt").write_text(user_prompt + "\n", encoding="utf-8")
     metadata = {
         "run_id": run_id,
-        "run_format_version": RUN_FORMAT_VERSION,
         "run_dir": str(run_dir),
         "runtime_dir": str(runtime_dir),
         "source_geometry": str(source),
@@ -102,7 +100,6 @@ def run_pipeline(
         **metadata,
         "prompt": user_prompt,
         "status": "created",
-        "input_version": 0,
         "repair_rounds": 0,
         "total_repair_rounds": 0,
     }
@@ -117,19 +114,10 @@ def run_pipeline(
     return _outcome(result, run_dir)
 
 
-def _load_supported_metadata(root: Path) -> dict[str, Any]:
-    metadata = load_json(root / "run-metadata.json")
-    if metadata.get("run_format_version") != RUN_FORMAT_VERSION:
-        raise ValueError(
-            "This run was created by an incompatible CFD Agent version; rerun it with that version or start a new run."
-        )
-    return metadata
-
-
 def inspect_confirmation(run_dir: str | Path, *, save_current: bool = False) -> dict[str, Any]:
     """Reread the user-edited CAD and report its actual named groups before resume."""
     root = Path(run_dir).expanduser().resolve()
-    metadata = _load_supported_metadata(root)
+    metadata = load_json(root / "run-metadata.json")
     graph = build_graph(metadata["checkpoint"])
     snapshot = graph.get_state({"configurable": {"thread_id": metadata["run_id"]}})
     state = snapshot.values
@@ -147,11 +135,15 @@ def inspect_confirmation(run_dir: str | Path, *, save_current: bool = False) -> 
                 receipt = {"ok": True, "saved": False, "mode": "hidden", "path": str(geometry)}
             write_json(root / "artifacts" / "confirmation-save.json", receipt)
         except Exception as error:
+            artifact = root / "artifacts" / "confirmation-error.json"
             write_json(
-                root / "artifacts" / "confirmation-error.json",
+                artifact,
                 {
                     "stage": "save_current_document",
                     "error": f"{type(error).__name__}: {error}",
+                    "error_detail": make_error_detail(
+                        "save_current_document", error, evidence_path=artifact
+                    ),
                 },
             )
             raise
@@ -176,12 +168,19 @@ def inspect_confirmation(run_dir: str | Path, *, save_current: bool = False) -> 
             inspection["roles"] = confirm_roles(
                 catalog=catalog, proposed={}, previous=state.get("boundary_roles", {})
             )
+            inspection["cad_validation"] = validate_confirmed_cad(
+                catalog=catalog, roles=inspection["roles"]
+            )
         except Exception as error:
+            artifact = root / "artifacts" / "confirmation-error.json"
             write_json(
-                root / "artifacts" / "confirmation-error.json",
+                artifact,
                 {
                     "stage": "confirm_saved_groups",
                     "error": f"{type(error).__name__}: {error}",
+                    "error_detail": make_error_detail(
+                        "confirm_saved_groups", error, evidence_path=artifact
+                    ),
                 },
             )
             raise
@@ -191,18 +190,25 @@ def inspect_confirmation(run_dir: str | Path, *, save_current: bool = False) -> 
 def fail_confirmation(run_dir: str | Path, error: Exception) -> dict[str, Any]:
     """End a failed CAD handoff without resuming software or leaving a live Fluent session."""
     root = Path(run_dir).expanduser().resolve()
-    metadata = _load_supported_metadata(root)
+    metadata = load_json(root / "run-metadata.json")
     graph = build_graph(metadata["checkpoint"])
     config = {"configurable": {"thread_id": metadata["run_id"]}}
     snapshot = graph.get_state(config)
     if "human_confirmation" not in snapshot.next:
         raise ValueError("This run has no pending CAD confirmation")
     close_client(metadata["run_id"])
+    artifact = root / "artifacts" / "confirmation-failure.json"
+    evidence = getattr(error, "evidence", None) or {}
+    detail = make_error_detail(
+        "human_confirmation", error, evidence=evidence, evidence_path=artifact
+    )
     result = {
         "status": "failed",
         "run_id": metadata["run_id"],
         "failed_step": "CAD save and confirmation",
         "error": f"{type(error).__name__}: {error}",
+        "error_evidence": evidence,
+        "error_detail": detail,
         "repair_rounds": snapshot.values.get("repair_rounds", 0),
     }
     update = _persist(
@@ -212,26 +218,16 @@ def fail_confirmation(run_dir: str | Path, error: Exception) -> dict[str, Any]:
             "status": "failed",
             "failed_step": result["failed_step"],
             "error": result["error"],
+            "error_evidence": evidence,
+            "error_detail": detail,
             "result": result,
         },
     )
     write_json(root / "result.json", result)
-    write_json(root / "artifacts" / "confirmation-failure.json", result)
+    write_json(artifact, result)
     graph.update_state(config, update, as_node="failed")
     (root / "pause.json").unlink(missing_ok=True)
     return _outcome({**snapshot.values, **update}, root)
-
-
-def get_paused_run(run_dir: str | Path) -> dict[str, Any]:
-    """Read the current checkpoint interrupt, not an old pause.json file."""
-    root = Path(run_dir).expanduser().resolve()
-    metadata = _load_supported_metadata(root)
-    graph = build_graph(metadata["checkpoint"])
-    snapshot = graph.get_state({"configurable": {"thread_id": metadata["run_id"]}})
-    interrupts = [item for task in snapshot.tasks for item in task.interrupts]
-    if not interrupts:
-        raise ValueError("This run has no pending confirmation")
-    return _outcome({**snapshot.values, "__interrupt__": interrupts}, root)
 
 
 def resume_pipeline(
@@ -246,7 +242,7 @@ def resume_pipeline(
 ) -> dict[str, Any]:
     """Resume a paused run from its SQLite checkpoint."""
     root = Path(run_dir).expanduser().resolve()
-    metadata = _load_supported_metadata(root)
+    metadata = load_json(root / "run-metadata.json")
     graph = build_graph(metadata["checkpoint"])
     snapshot = graph.get_state({"configurable": {"thread_id": metadata["run_id"]}})
     if "human_intervention" in snapshot.next:
@@ -270,5 +266,5 @@ def resume_pipeline(
 
 
 def close_run_sessions(run_dir: str | Path) -> None:
-    metadata = _load_supported_metadata(Path(run_dir))
+    metadata = load_json(Path(run_dir) / "run-metadata.json")
     close_client(metadata["run_id"])

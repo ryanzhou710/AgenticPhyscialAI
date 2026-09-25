@@ -8,13 +8,15 @@ from typing import Any
 
 from langgraph.types import Command, interrupt
 
-from src.adapters.fluent import close_client
-from src.adapters.spaceclaim import SpaceClaimRunner
-from src.config import config_from_state
-from src.services.artifacts import write_json
-from src.services.boundaries import build_fluent_job, confirm_roles, rebind_mesh_targets
+from src.services.boundaries import (
+    build_fluent_job,
+    confirm_roles,
+    rebind_mesh_targets,
+    validate_confirmed_cad,
+)
 from src.services.contracts import ConfirmationPayload, HumanInterventionPayload
-from src.services.execution import _failed, _persist, _run_dir
+from src.services.execution import _failed, _run_dir, _succeeded
+from src.services.spaceclaim_runtime import open_spaceclaim_reader
 from src.state import PipelineState
 
 
@@ -30,19 +32,28 @@ def human_confirmation(state: PipelineState) -> dict[str, Any]:
             "message": message,
             "working_geometry": state["working_geometry"],
             "boundary_roles": state["boundary_roles"],
-            "spaceclaim_process_id": state["labeling"].get("process_id"),
             "human_request": request,
         }
     )
     payload = ConfirmationPayload.model_validate(response)
-    return _persist(
+    return _succeeded(
         state,
         "human_confirmation",
         {
             "human_response": payload.model_dump(mode="json"),
             "status": "running",
-            "error": "",
         },
+    )
+
+
+def _approved_repair(decision: dict[str, Any]) -> Command:
+    return Command(
+        update={
+            "repair_decision": decision,
+            "repair_approved": True,
+            "human_request": {},
+        },
+        goto="apply_repair",
     )
 
 
@@ -61,31 +72,20 @@ def human_intervention(state: PipelineState) -> Command:
         return Command(
             update={
                 "prompt": clarified,
-                "input_version": state.get("input_version", 0) + 1,
                 "repair_rounds": 0,
                 "human_request": {},
-                "error": "",
-                "failed_step": "",
             },
             goto="understand_prompt",
         )
-    if kind == "locked_parameter":
+    if kind == "parameter_change":
         if payload.action != "approve":
-            raise ValueError("Locked parameter changes require action=approve or cancel")
+            raise ValueError("User parameter changes require action=approve or cancel")
         decision = dict(state["repair_decision"])
         parameters = dict(decision["parameters"])
         if payload.parameter_value is not None:
             parameters["value"] = payload.parameter_value
         decision["parameters"] = parameters
-        return Command(
-            update={
-                "repair_decision": decision,
-                "repair_override": True,
-                "pending_repair_after_rebuild": True,
-                "human_request": {},
-            },
-            goto="rebuild_fluent",
-        )
+        return _approved_repair(decision)
     if kind == "boundary_mapping":
         if payload.action != "approve":
             raise ValueError("Boundary mapping requires action=approve")
@@ -105,45 +105,33 @@ def human_intervention(state: PipelineState) -> Command:
         else:
             raise ValueError("Boundary mapping requires boundary_replacement")
         decision["parameters"] = parameters
-        return Command(
-            update={
-                "repair_decision": decision,
-                "repair_override": True,
-                "pending_repair_after_rebuild": True,
-                "human_request": {},
-            },
-            goto="rebuild_fluent",
-        )
+        return _approved_repair(decision)
     raise ValueError("Unsupported human intervention kind: " + str(kind))
 
 
 def reload_confirmed_cad(state: PipelineState) -> dict[str, Any]:
     try:
         response = ConfirmationPayload.model_validate(state["human_response"])
-        runner = SpaceClaimRunner(
-            output_dir=_run_dir(state) / "artifacts" / "confirmed-catalog",
-            ui_mode="hidden",
-            config=config_from_state(state),
-        )
-        try:
+        with open_spaceclaim_reader(
+            state, _run_dir(state) / "artifacts" / "confirmed-catalog", ui_mode="hidden"
+        ) as runner:
             catalog, path = runner.catalog(Path(state["working_geometry"]), render_candidates=False)
-        finally:
-            runner.close()
         roles = confirm_roles(
             catalog=catalog,
             proposed=response.boundary_roles,
             previous=state["boundary_roles"],
         )
-        confirmed = _run_dir(state) / "artifacts" / "confirmed.scdoc"
-        shutil.copy2(state["working_geometry"], confirmed)
+        confirmed_validation = validate_confirmed_cad(catalog=catalog, roles=roles)
+        confirmed_path = _run_dir(state) / "artifacts" / "confirmed.scdoc"
+        shutil.copy2(state["working_geometry"], confirmed_path)
         # CAD readers run outside Python; use the same ASCII staging convention
         # as SpaceClaim instead of handing a Unicode archive path to Fluent.
         runtime_confirmed = Path(state["runtime_dir"]) / "confirmed.scdoc"
-        shutil.copy2(confirmed, runtime_confirmed)
+        shutil.copy2(confirmed_path, runtime_confirmed)
         requirements = rebind_mesh_targets(
             requirements=state["mesh_requirements"],
             previous_groups=state["labeling"]["groups"],
-            confirmed=catalog,
+            confirmed_catalog=catalog,
             roles=roles,
         )
         job = build_fluent_job(
@@ -151,47 +139,32 @@ def reload_confirmed_cad(state: PipelineState) -> dict[str, Any]:
             roles=roles,
             requirements=requirements,
         )
-        return _persist(
+        return _succeeded(
             state,
             "reload_confirmed_cad",
             {
-                "confirmed_geometry": str(confirmed),
-                "confirmed_catalog": catalog.model_dump(mode="json"),
+                "confirmed_geometry": str(confirmed_path),
                 "boundary_roles": roles,
                 "fluent_job": job,
                 "mesh_requirements": requirements,
+                "cad_validation": confirmed_validation,
                 # A saved CAD or role mapping is a new downstream input.  Do
                 # not retain observations or final controls from its earlier
                 # Fluent session.
                 "fluent_steps": {},
                 "final_execution": {},
-                "input_version": state.get("input_version", 0) + int(bool(state.get("human_request"))),
                 "repair_rounds": 0 if state.get("human_request") else state.get("repair_rounds", 0),
                 "human_request": {},
-                "repair_override": False,
+                "repair_approved": False,
                 "artifacts": {
                     **state["artifacts"],
-                    "confirmed_geometry": str(confirmed),
+                    "confirmed_geometry": str(confirmed_path),
                     "confirmed_catalog": str(path),
                 },
-                "error": "",
             },
         )
     except Exception as error:
         return _failed(state, "reload_confirmed_cad", error)
 
-
 def confirmation_route(state: PipelineState) -> str:
     return "cancelled" if state["human_response"]["action"] == "cancel" else "reload_confirmed_cad"
-
-
-def cancelled(state: PipelineState) -> dict[str, Any]:
-    close_client(state["run_id"])
-    result = {
-        "status": "cancelled",
-        "run_id": state["run_id"],
-        "working_geometry": state["working_geometry"],
-        "reason": "User cancelled",
-    }
-    write_json(_run_dir(state) / "result.json", result)
-    return _persist(state, "cancelled", {"status": "cancelled", "result": result, "error": ""})

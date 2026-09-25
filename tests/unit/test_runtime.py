@@ -214,13 +214,23 @@ def test_cli_requires_prompt_file_and_rejects_inline_prompt(prompt_args):
 
 
 @pytest.mark.parametrize("answer,expected", [("accept", None), ("5", 5), ("cancel", "cancel")])
-def test_cli_locked_parameter_intervention_resumes_with_explicit_value(monkeypatch, answer, expected):
+def test_cli_parameter_change_intervention_resumes_with_explicit_value(monkeypatch, capsys, answer, expected):
     pause = {
-        "kind": "locked_parameter",
-        "message": "Locked control needs approval",
+        "kind": "parameter_change",
+        "message": "User parameter change needs approval",
         "failed_step": "boundary_layers",
         "required_action": "approve or cancel",
-        "evidence": {"proposed_parameters": {"value": 3}},
+        "evidence": {
+            "proposed_parameters": {"value": 3},
+            "repair_action": "set_layer_count",
+            "target": ["wall"],
+            "requested_value": 80,
+            "requested_unit": "dimensionless",
+            "current_value": 80,
+            "proposed_value": 3,
+            "unit": "dimensionless",
+            "diagnosis": "Native layer count rejected",
+        },
     }
     calls = []
 
@@ -237,11 +247,6 @@ def test_cli_locked_parameter_intervention_resumes_with_explicit_value(monkeypat
     assert len(calls) == 1
     assert result["status"] == ("cancelled" if expected == "cancel" else "success")
     assert calls[0].get("parameter_value") == (expected if isinstance(expected, int) else None)
-
-
-def test_legacy_checkpoint_is_explicitly_rejected(tmp_path):
-    (tmp_path / "run-metadata.json").write_text(
-        json.dumps({"checkpoint": "unused", "run_id": "run"})
-    )
-    with pytest.raises(ValueError, match="incompatible CFD Agent version"):
-        api.resume_pipeline(run_dir=tmp_path, action="approve")
+    output = capsys.readouterr().out
+    for expected_text in ["set_layer_count", "wall", "Current value: 80", "Proposed value: 3", "Native layer count rejected"]:
+        assert expected_text in output

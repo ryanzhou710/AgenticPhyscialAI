@@ -25,10 +25,7 @@ dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
 cfd-agent = "src.cli:main"
 
 [tool.setuptools]
-packages = ["src", "src.adapters", "src.nodes", "src.prompts", "src.services", "src.workers"]
-
-[tool.setuptools.package-data]
-src = ["prompts/*.md"]
+packages = ["src", "src.adapters", "src.nodes", "src.services", "src.workers"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

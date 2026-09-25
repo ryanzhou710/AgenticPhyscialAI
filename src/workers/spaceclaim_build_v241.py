@@ -25,6 +25,7 @@ build_result = {
     "steps": [],
     "images": [],
 }
+failure_evidence = {}
 
 
 def record(step, data):
@@ -41,59 +42,7 @@ def save_picture(name):
     build_result["images"].append({"view": name, "path": path})
 
 
-def _public_row(catalog, collection, candidate_id):
-    for row in catalog["public"].get(collection, []):
-        if row["id"] == candidate_id:
-            return row
-    return None
-
-
-def _face_loops(catalog, face_id):
-    return [row for row in catalog["public"].get("loops", [])
-            if row["face_id"] == face_id]
-
-
-def _boundary_edges(loop):
-    edge_ids = loop.get("edge_ids") or []
-    if not edge_ids:
-        raise ValueError("Selected opening loop has no edges")
-    try:
-        return [LIVE_OBJECTS[edge_id] for edge_id in edge_ids]
-    except KeyError:
-        raise ValueError("Selected opening loop contains an unknown edge")
-
-
-def _support_face(port, catalog):
-    candidate_id = port["candidate_id"]
-    if candidate_id.startswith("F"):
-        return LIVE_OBJECTS[candidate_id]
-    if candidate_id.startswith("L"):
-        loop = _public_row(catalog, "loops", candidate_id)
-        face_id = loop.get("face_id") if loop else None
-        if face_id:
-            return LIVE_OBJECTS[face_id]
-    if candidate_id.startswith("E"):
-        edge = LIVE_OBJECTS[candidate_id]
-        if edge.Faces.Count == 1:
-            return list(edge.Faces)[0]
-    return None
-
-
-def _face_can_cap_opening(port, catalog):
-    """Return whether selecting the support face caps only this opening loop."""
-    candidate_id = port["candidate_id"]
-    if candidate_id.startswith("F"):
-        loops = _face_loops(catalog, candidate_id)
-    elif candidate_id.startswith("L"):
-        loop = _public_row(catalog, "loops", candidate_id)
-        face_id = loop.get("face_id") if loop else None
-        loops = _face_loops(catalog, face_id) if face_id else []
-    else:
-        return False
-    return len(loops) == 1 and bool(loops[0].get("is_outer"))
-
-
-def _temporary_cap_measurement(edges, port):
+def _temporary_cap_measurement(edges, terminal):
     """Measure a closed inner contour through a temporary native planar cap.
 
     A support-face centroid describes the entire annular face, not its inner
@@ -102,42 +51,54 @@ def _temporary_cap_measurement(edges, port):
     The created face is deleted before volume extraction, so it never becomes
     part of the delivered CAD.
     """
-    patch = None
+    patches = []
     try:
         result = Fill.Execute(
             Selection.Create(edges), Selection.Empty(), FillOptions(), FillMode.ThreeD, None)
         faces = list(result.CreatedFaces)
+        # Fill can create more than one face before it reports that the selected
+        # contour is unsuitable.  Keep every native object so cleanup is complete
+        # on both normal and exceptional paths.
+        patches = faces
         if len(faces) != 1:
             raise ValueError(
-                "Temporary cap creation did not produce exactly one face for " + port["name"])
-        patch = faces[0]
+                "Temporary cap creation did not produce exactly one face for " + terminal["name"])
+        patch = patches[0]
         if not isinstance(patch.Shape.Geometry, Plane):
-            raise ValueError("Temporary cap is not planar for " + port["name"])
+            raise ValueError("Temporary cap is not planar for " + terminal["name"])
         return {
             "center_m": vector3(MeasureHelper.GetCentroid(Selection.Create(patch))),
             "area_m2": float(patch.Area),
         }
     finally:
-        if patch is not None:
-            Delete.Execute(Selection.Create(patch))
+        # A failed cleanup makes the document state untrustworthy.  Deliberately
+        # propagate it instead of silently continuing an extraction attempt.
+        cleanup_errors = []
+        for patch in reversed(patches):
+            try:
+                Delete.Execute(Selection.Create(patch))
+            except Exception as cleanup_error:
+                cleanup_errors.append(str(cleanup_error))
+        if cleanup_errors:
+            raise RuntimeError("Temporary cap cleanup failed: " + "; ".join(cleanup_errors))
 
 
-def _terminal_record(port, face, loop, edges):
+def _terminal_record(record, face, edges):
     if not isinstance(face.Shape.Geometry, Plane):
-        raise ValueError("Selected opening support face is not planar: " + port["name"])
+        raise ValueError("Selected opening support face is not planar: " + record["name"])
     perimeter = sum(float(edge.Shape.Length) for edge in edges)
-    if loop.get("is_outer"):
+    if record.get("is_outer"):
         measurement = {
             "center_m": vector3(MeasureHelper.GetCentroid(Selection.Create(face))),
             "area_m2": float(face.Area),
         }
     else:
-        measurement = _temporary_cap_measurement(edges, port)
+        measurement = _temporary_cap_measurement(edges, record)
     terminal = {
-        "name": port["name"],
-        "role": port["role"],
-        "source_candidate_id": port["candidate_id"],
-        "source_loop_id": loop["id"],
+        "name": record["name"],
+        "role": record["role"],
+        "source_candidate_id": record["source_candidate_id"],
+        "source_loop_id": record.get("contour_loop_id"),
         "source_face_moniker": moniker_of(face),
         "boundary_edge_count": len(edges),
         "boundary_perimeter_m": perimeter,
@@ -148,56 +109,34 @@ def _terminal_record(port, face, loop, edges):
     return terminal
 
 
-def terminal_from_selection(port, catalog):
-    candidate_id = port["candidate_id"]
-    if candidate_id.startswith("F"):
-        face = LIVE_OBJECTS[candidate_id]
-        loops = _face_loops(catalog, candidate_id)
-        inner_loops = [loop for loop in loops if not loop.get("is_outer")]
-        outer_loops = [loop for loop in loops if loop.get("is_outer")]
-        if len(inner_loops) == 1:
-            loop = inner_loops[0]
-        elif not inner_loops and len(outer_loops) == 1:
-            # A solid with a flush end is represented by its planar end face;
-            # its outer loop is the complete inlet/outlet boundary.
-            loop = outer_loops[0]
-        else:
-            raise ValueError(
-                "Selected opening face must have exactly one closed opening loop: "
-                + port["name"])
-        edges = _boundary_edges(loop)
-        return edges, _terminal_record(port, face, loop, edges)
+def terminal_from_record(record):
+    """Resolve native identities for a Python-validated terminal record only."""
+    try:
+        face = LIVE_OBJECTS[record["support_face_id"]]
+        edges = [LIVE_OBJECTS[edge_id] for edge_id in record["edge_ids"]]
+    except KeyError:
+        raise ValueError("Validated opening record no longer matches the CAD object identity")
+    if not edges:
+        raise ValueError("Validated opening record has no boundary edges")
+    return edges, _terminal_record(record, face, edges)
 
-    if candidate_id.startswith("L"):
-        loop = _public_row(catalog, "loops", candidate_id)
-        if loop is None or not loop.get("closed"):
-            raise ValueError("Selected opening loop is not a closed loop: " + port["name"])
-        face = LIVE_OBJECTS.get(loop.get("face_id"))
-        if face is None:
-            raise ValueError("Selected opening loop has no support face: " + port["name"])
-        edges = _boundary_edges(loop)
-        return edges, _terminal_record(port, face, loop, edges)
 
-    if candidate_id.startswith("E"):
-        edge = LIVE_OBJECTS[candidate_id]
-        geometry = edge.Shape.Geometry
-        closed = bool(getattr(edge.Shape, "IsClosed", False))
-        if isinstance(geometry, Circle):
-            closed = True
-        if edge.Faces.Count != 1 or not closed:
-            raise ValueError(
-                "Selected opening edge must be a single closed boundary edge: "
-                + port["name"])
-        face = list(edge.Faces)[0]
-        loop = {
-            "id": None,
-            "is_outer": False,
-            "closed": True,
-            "edge_ids": [candidate_id],
-        }
-        return [edge], _terminal_record(port, face, loop, [edge])
-
-    raise ValueError("Unsupported opening candidate: " + candidate_id)
+def existing_terminal_from_record(record):
+    """Reuse the confirmed source-face identity without temporary cap geometry."""
+    try:
+        face = LIVE_OBJECTS[record["support_face_id"]]
+        edges = [LIVE_OBJECTS[edge_id] for edge_id in record["edge_ids"]]
+    except KeyError:
+        raise ValueError("Validated opening record no longer matches the CAD object identity")
+    return {
+        "name": record["name"],
+        "role": record["role"],
+        "source_candidate_id": record["source_candidate_id"],
+        "source_loop_id": record.get("contour_loop_id"),
+        "source_face_moniker": moniker_of(face),
+        "boundary_edge_count": len(edges),
+        "boundary_perimeter_m": sum(float(edge.Shape.Length) for edge in edges),
+    }
 
 
 try:
@@ -206,30 +145,29 @@ try:
 
     if operation == "extract_volume":
         catalog = build_catalog()
-        plan = build_request["selection_plan"]
-        requested = [item["candidate_id"] for item in plan["openings"]]
-        requested.append(plan["seed_inner_wall_id"])
-        boundaries = build_request["terminal_boundaries"]
-        for boundary in boundaries.values():
-            requested.extend(boundary["edge_ids"])
+        terminal_records = build_request["terminal_records"]
+        seed_face_id = build_request["seed_face_id"]
+        requested = [seed_face_id]
+        for terminal_record in terminal_records:
+            requested.extend([
+                terminal_record["source_candidate_id"],
+                terminal_record["support_face_id"],
+            ])
+            requested.extend(terminal_record["edge_ids"])
         validate_catalog_identity(build_request["catalog"], catalog, requested)
-
-        terminals = []
-        for port in plan["openings"]:
-            edges, terminal = terminal_from_selection(port, catalog)
-            terminals.append(terminal)
 
         positive_bodies = [
             body for body in catalog["public"]["bodies"]
             if body.get("kind") == "solid" and (body.get("volume_m3") or 0.0) > 0.0
         ]
         if build_request.get("existing_fluid_body"):
+            terminals = [existing_terminal_from_record(record) for record in terminal_records]
             all_bodies = list(DocumentHelper.GetRootPart().GetAllBodies())
             if len(all_bodies) != 1 or len(positive_bodies) != 1:
                 raise ValueError(
                     "Existing-fluid-body mode requires exactly one positive-volume solid body")
             fluid = LIVE_OBJECTS[positive_bodies[0]["id"]]
-            seed_face = LIVE_OBJECTS[plan["seed_inner_wall_id"]]
+            seed_face = LIVE_OBJECTS[seed_face_id]
             if seed_face.Parent != fluid:
                 raise ValueError("The selected seed face is not on the existing fluid body")
             seed_center = MeasureHelper.GetCentroid(Selection.Create(seed_face))
@@ -255,41 +193,36 @@ try:
             save_picture("existing-fluid")
         else:
             cap_edges = []
-            for port in plan["openings"]:
-                edges, _ = terminal_from_selection(port, catalog)
+            terminals = []
+            for terminal_record in terminal_records:
+                edges, terminal = terminal_from_record(terminal_record)
                 cap_edges.extend(edges)
-            seed_face = LIVE_OBJECTS[plan["seed_inner_wall_id"]]
-            if plan["seed_inner_wall_id"].startswith("F") is False:
-                raise ValueError("The fluid-volume seed must be a face")
+                terminals.append(terminal)
+            seed_face = LIVE_OBJECTS[seed_face_id]
             seed_center = MeasureHelper.GetCentroid(Selection.Create(seed_face))
             seed_point = seed_face.Shape.Geometry.ProjectPoint(seed_center).Point
             options = VolumeExtractOptions()
             options.SeedPoint = seed_face.Shape.Geometry.ProjectPoint(seed_center)
             options.CreateShareTopology = False
-            # V241's face-selection mode is the stable API path for flush end
-            # faces. It lets SpaceClaim derive and cap every edge in each
-            # selected planar terminal, including multi-edge rectangular loops.
-            cap_faces = []
-            if all(_face_can_cap_opening(port, catalog) for port in plan["openings"]):
-                for port in plan["openings"]:
-                    face = _support_face(port, catalog)
-                    if face is None:
-                        cap_faces = []
-                        break
-                    cap_faces.append(face)
-            if cap_faces:
+            strategy = build_request["extraction_strategy"]
+            if strategy == "faces":
+                if not all(record.get("face_cap_supported") for record in terminal_records):
+                    raise ValueError("Face capping was requested for a non-equivalent opening contour")
+                cap_faces = [LIVE_OBJECTS[record["support_face_id"]] for record in terminal_records]
                 extraction = VolumeExtract.Create(
                     Selection.Create(cap_faces), Selection.Create(seed_face), options)
-            else:
+            elif strategy == "edges":
                 extraction = VolumeExtract.Create(
                     Selection.Create(cap_edges), Selection.Create(seed_face), options)
+            else:
+                raise ValueError("Unsupported extraction strategy: " + str(strategy))
             volumes = list(extraction.CreatedVolumes)
             if not extraction.Success or len(volumes) != 1 or volumes[0].Shape.Volume <= 0:
                 raise ValueError(
                     "VolumeExtract did not create exactly one positive fluid volume "
                     "(success=%s, created_volumes=%s, cap_edges=%s, seed_face=%s)" % (
                         extraction.Success, len(volumes), len(cap_edges),
-                        plan["seed_inner_wall_id"]))
+                        seed_face_id))
             fluid = volumes[0]
             for group in list(Window.ActiveWindow.Groups):
                 group.Delete()
@@ -297,7 +230,6 @@ try:
             if others:
                 Delete.Execute(Selection.Create(others))
             RenameObject.Execute(Selection.Create(fluid), "fluid")
-            DocumentSave.Execute(build_request["output"])
             extracted_catalog = build_catalog()
             free_edges = [
                 edge["id"] for edge in extracted_catalog["public"]["edges"]
@@ -305,8 +237,10 @@ try:
             ]
             if free_edges:
                 raise ValueError("Extracted fluid body contains free edges: " + str(free_edges))
+            DocumentSave.Execute(build_request["output"])
             build_result["transfer"] = {
                 "source_mode": "volume_extract",
+                "extraction_strategy": strategy,
                 "terminals": terminals,
                 "seed_point_m": vector3(seed_point),
                 "volume_m3": float(fluid.Shape.Volume),
@@ -358,6 +292,31 @@ try:
                     ):
                         matches.append(face)
             if len(matches) != 1 or matches[0] in assigned:
+                candidate_measurements = []
+                for face in fluid.Faces:
+                    if not isinstance(face.Shape.Geometry, Plane):
+                        continue
+                    point = vector3(MeasureHelper.GetCentroid(Selection.Create(face)))
+                    normal = plane_normal(face)
+                    delta = [point[i] - terminal["center_m"][i] for i in range(3)]
+                    candidate_measurements.append({
+                        "face_moniker": moniker_of(face),
+                        "area_m2": float(face.Area),
+                        "perimeter_m": float(face.Perimeter),
+                        "center_m": point,
+                        "normal": normal,
+                        "center_distance_m": sum(value * value for value in delta) ** 0.5,
+                        "area_difference_m2": abs(float(face.Area) - terminal["area_m2"]),
+                        "perimeter_difference_m": abs(
+                            float(face.Perimeter) - terminal["boundary_perimeter_m"]),
+                        "normal_alignment": abs(sum(
+                            normal[i] * terminal["normal"][i] for i in range(3))),
+                    })
+                failure_evidence["boundary_mapping"] = {
+                    "terminal": terminal["name"],
+                    "matching_face_count": len(matches),
+                    "candidate_faces": candidate_measurements,
+                }
                 raise ValueError("Cannot uniquely map extracted cap for " + terminal["name"])
             assigned.append(matches[0])
             groups.append((terminal["name"], terminal["role"], matches))
@@ -369,8 +328,6 @@ try:
             raise ValueError("Boundary group names are not unique")
         for name, role, faces in groups:
             Group.Create(DocumentHelper.GetRootPart(), name, List[IDocObject](faces))
-        DocumentSave.Execute(build_request["output"])
-        final_catalog = build_catalog()
         group_records = [
             {
                 "name": name,
@@ -383,6 +340,8 @@ try:
         coverage = sum(item["count"] for item in group_records)
         if coverage != fluid.Faces.Count:
             raise ValueError("Boundary groups do not cover every fluid face")
+        final_catalog = build_catalog()
+        DocumentSave.Execute(build_request["output"])
         build_result["groups"] = group_records
         build_result["catalog"] = final_catalog
         build_result["coverage"] = coverage
@@ -398,8 +357,25 @@ try:
         raise ValueError("Unsupported build operation: " + str(operation))
 
     build_result["ok"] = True
-except Exception:
+except Exception as error:
     build_result["error"] = traceback.format_exc()
+    message = (str(error) or "").lower()
+    code = "CAD_BUILD_OPERATION_FAILED"
+    if "identity" in message or "moniker" in message:
+        code = "CAD_OBJECT_IDENTITY_CHANGED"
+    elif "cleanup" in message or "delete.execute" in message:
+        code = "CAD_TEMPORARY_CLEANUP_FAILED"
+    elif "license" in message:
+        code = "CAD_LICENSE_UNAVAILABLE"
+    elif "not planar" in message or "closed opening" in message or "boundary edges" in message:
+        code = "CAD_OPENING_INVALID"
+    build_result["error_detail"] = {
+        "code": code,
+        "stage": build_result.get("operation"),
+        "reason": str(error) or "SpaceClaim native operation failed without a message",
+        "raw_error": build_result["error"],
+        "evidence": failure_evidence,
+    }
 
 temporary = build_request["response"] + ".tmp"
 with open(temporary, "w") as response_stream:

@@ -31,7 +31,6 @@ def build_graph(checkpoint_path: str | Path):
     add_node("human_intervention", confirmation.human_intervention)
     add_node("reload_confirmed_cad", confirmation.reload_confirmed_cad)
     add_node("launch_fluent", fluent.launch_fluent)
-    add_node("rebuild_fluent", fluent.rebuild_fluent)
     for step in fluent.FLUENT_STEPS:
         add_node(step, fluent.fluent_step(step))
     add_node("final_validation", fluent.validate_mesh)
@@ -39,7 +38,7 @@ def build_graph(checkpoint_path: str | Path):
     add_node("apply_repair", review.apply_repair)
     add_node("completed", results.completed)
     add_node("failed", results.failed)
-    add_node("cancelled", confirmation.cancelled)
+    add_node("cancelled", results.cancelled)
 
     normal = [
         "prepare",

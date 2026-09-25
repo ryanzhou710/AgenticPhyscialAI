@@ -113,10 +113,14 @@ try:
         resolved, selected = select_candidates(request, current_catalog)
         response.update(selected)
         response["images"] = render_views(
-            folder, stem, resolved, request.get("views"), current_catalog)
+            folder, stem, resolved, request.get("views"), current_catalog,
+            request.get("detail_views"))
         requested_views = (request.get("views") if request.get("views") is not None
                            else DEFAULT_VIEWS)
-        require_rendered_views(response["images"], list(requested_views) + ["Selected"])
+        detail_views = request.get("detail_views") or ["Selected"]
+        if any(view not in DETAIL_VIEWS for view in detail_views):
+            raise ValueError("select contains an unsupported detail view")
+        require_rendered_views(response["images"], list(requested_views) + list(detail_views))
 
         # Rendering changes camera and display colors but must not change the
         # requested active selection.  Verify the exact moniker set again.
@@ -159,12 +163,16 @@ try:
                 task_views = item.get("views")
                 if task_views is None:
                     task_views = []
+                task_detail_views = item.get("detail_views") or ["Selected"]
+                if any(view not in DETAIL_VIEWS for view in task_detail_views):
+                    raise ValueError("batch_select contains an unsupported detail view")
                 task_stem = "%s-task-%04d-%s" % (
                     stem, index + 1, safe_stem(task_id))
                 task_result["images"] = render_views(
-                    folder, task_stem, resolved, task_views, current_catalog)
+                    folder, task_stem, resolved, task_views, current_catalog,
+                    task_detail_views)
                 require_rendered_views(
-                    task_result["images"], list(task_views) + ["Selected"])
+                    task_result["images"], list(task_views) + list(task_detail_views))
                 final_ids, final_monikers = verify_active_selection(
                     resolved, current_catalog)
                 if final_ids != sorted(task_result["expanded_candidate_ids"]):

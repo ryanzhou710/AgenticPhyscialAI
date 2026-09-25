@@ -12,6 +12,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
@@ -30,10 +31,16 @@ ALLOWED_EVIDENCE_VIEWS = frozenset(
         "Isometric",
     }
 )
+ALLOWED_DETAIL_VIEWS = frozenset({"Selected", "OwnerContext", "SelectedProxy"})
 
 
 class SpaceClaimError(RuntimeError):
-    pass
+    def __init__(
+        self, message: str, *, detail: dict | None = None, evidence: dict | None = None
+    ) -> None:
+        super().__init__(message)
+        self.detail = detail or {}
+        self.evidence = evidence or {}
 
 
 class SpaceClaimRunner:
@@ -166,16 +173,17 @@ class SpaceClaimRunner:
         except OSError:
             return ImageFont.load_default()
 
-    def _annotate_candidate(self, path: Path, candidate_id: str) -> None:
+    def _annotate_candidate(self, path: Path, candidate_id: str, view: str | None = None) -> None:
         with Image.open(path).convert("RGB") as source:
             image = source.copy()
         draw = ImageDraw.Draw(image)
         font = self._font(42)
-        box = draw.textbbox((0, 0), candidate_id, font=font)
+        label = candidate_id if not view else candidate_id + " / " + view
+        box = draw.textbbox((0, 0), label, font=font)
         width = box[2] - box[0] + 30
         height = box[3] - box[1] + 20
         draw.rectangle((0, 0, width, height), fill=(255, 235, 0), outline=(0, 0, 0), width=3)
-        draw.text((15, 8), candidate_id, fill=(0, 0, 0), font=font)
+        draw.text((15, 8), label, fill=(0, 0, 0), font=font)
         image.save(path)
 
     def _contact_sheets(self, run_id: str, candidate_images: list[dict]) -> list[dict]:
@@ -223,6 +231,25 @@ class SpaceClaimRunner:
         if len(result) != len(set(result)):
             raise ValueError("views must not contain duplicates")
         return result
+
+    @staticmethod
+    def _normalize_detail_views(views: list[str] | None) -> list[str]:
+        result = ["Selected"] if views is None else list(views)
+        if any(not isinstance(view, str) or view not in ALLOWED_DETAIL_VIEWS for view in result):
+            raise ValueError("detail_views contains an unsupported candidate detail view")
+        if not result or len(result) != len(set(result)):
+            raise ValueError("detail_views must be a non-empty list without duplicates")
+        return result
+
+    @staticmethod
+    def _require_detail_evidence(images: list[dict], expected: list[str], *, context: str) -> None:
+        for view in expected:
+            rows = [row for row in images if row.get("view") == view]
+            if len(rows) != 1:
+                raise SpaceClaimError(f"{context} requires exactly one {view} image")
+            path = Path(rows[0].get("path", ""))
+            if rows[0].get("error") or not path.is_file():
+                raise SpaceClaimError(f"{context} did not produce a usable {view} image")
 
     @staticmethod
     def _require_view_evidence(images: list[dict], expected: list[str], *, context: str) -> None:
@@ -393,7 +420,9 @@ class SpaceClaimRunner:
                     shutil.copy2(source, destination)
                     row["path"] = str(destination)
                     if row.get("candidate_id"):
-                        self._annotate_candidate(destination, str(row["candidate_id"]))
+                        self._annotate_candidate(
+                            destination, str(row["candidate_id"]), str(row.get("view") or "")
+                        )
                         row["model_visible"] = False
                     else:
                         row["model_visible"] = True
@@ -412,7 +441,8 @@ class SpaceClaimRunner:
             candidate_images = [
                 row for row in copied_images if row.get("candidate_id") and row.get("path")
             ]
-            copied_images.extend(self._contact_sheets(run_id, candidate_images))
+            if request_data.get("render_contact_sheets"):
+                copied_images.extend(self._contact_sheets(run_id, candidate_images))
             response["images"] = copied_images
             record_path = self.output_dir / f"spaceclaim-{run_id}.json"
             record_path.write_text(
@@ -438,6 +468,7 @@ class SpaceClaimRunner:
             {
                 "operation": "catalog",
                 "render_candidates": bool(render_candidates),
+                "render_contact_sheets": bool(render_candidates),
                 "candidate_collections": candidate_collections,
             },
         )
@@ -545,9 +576,10 @@ class SpaceClaimRunner:
     ) -> list[dict]:
         """Execute predicted selections in one SpaceClaim session.
 
-        Each item is ``{task_id, candidate_ids, views?}``.  The default is a
-        single fitted ``Selected`` evidence image per task.  Runtime failures
-        remain attached to that task and never trigger a replacement choice.
+        Each item is ``{task_id, candidate_ids, views?, detail_views?}``.
+        ``detail_views`` controls only the selected-object evidence and defaults
+        to one fitted ``Selected`` image. Runtime failures remain attached to
+        that task and never trigger a replacement choice.
         """
         if not isinstance(selections, list) or not selections:
             raise ValueError("selections must be a non-empty list")
@@ -576,11 +608,13 @@ class SpaceClaimRunner:
             if unknown:
                 raise ValueError(f"{task_id}: unknown candidate IDs: " + ", ".join(unknown))
             task_views = self._normalize_views(item.get("views"), default=())
+            detail_views = self._normalize_detail_views(item.get("detail_views"))
             normalized.append(
                 {
                     "task_id": task_id,
                     "candidate_ids": list(candidate_ids),
                     "views": task_views,
+                    "detail_views": detail_views,
                 }
             )
 
@@ -627,7 +661,12 @@ class SpaceClaimRunner:
                     )
                 self._require_view_evidence(
                     row.get("images", []),
-                    request_item["views"] + ["Selected"],
+                    request_item["views"],
+                    context=f"SpaceClaim batch task {request_item['task_id']}",
+                )
+                self._require_detail_evidence(
+                    row.get("images", []),
+                    request_item["detail_views"],
                     context=f"SpaceClaim batch task {request_item['task_id']}",
                 )
             elif not row.get("error"):
@@ -638,6 +677,39 @@ class SpaceClaimRunner:
             row["record_path"] = response.get("record_path")
             checked.append(row)
         return checked
+
+    def render_candidate_details(
+        self,
+        geometry_path: Path,
+        catalog: GeometryCatalog,
+        requests: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Render selected candidate evidence in one SpaceClaim invocation per round."""
+
+        if len({item.get("candidate_id") for item in requests}) != len(requests) or len(requests) > 12:
+            raise ValueError("candidate detail rendering requires at most 12 distinct candidates")
+        selections = [
+            {
+                "task_id": "detail-" + str(item["candidate_id"]),
+                "candidate_ids": [item["candidate_id"]],
+                "views": [],
+                "detail_views": item["detail_views"],
+            }
+            for item in requests
+        ]
+        results = self.batch_select(geometry_path, catalog, selections)
+        rendered: list[dict[str, Any]] = []
+        for request, result in zip(requests, results, strict=True):
+            candidate_id = request["candidate_id"]
+            expected = set(request["detail_views"])
+            for image in result.get("images", []):
+                if image.get("view") not in expected:
+                    continue
+                row = {**image, "candidate_id": candidate_id, "purpose": request["purpose"]}
+                path = Path(row["path"])
+                self._annotate_candidate(path, candidate_id, str(image.get("view") or ""))
+                rendered.append(row)
+        return rendered
 
     def close(self) -> None:
         for stage in list(getattr(self, "_stages", set())):

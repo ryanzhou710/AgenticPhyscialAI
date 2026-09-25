@@ -23,7 +23,8 @@ from src.workers.repair_protocol import RepairState
 def test_graph_contains_spaceclaim_and_fluent_steps(tmp_path: Path):
     graph = build_graph(tmp_path / "checkpoints.sqlite")
     names = set(graph.get_graph().nodes)
-    assert {"extract_volume", "label_faces", "human_confirmation", "rebuild_fluent"} <= names
+    assert {"extract_volume", "label_faces", "human_confirmation", "launch_fluent"} <= names
+    assert not any(name.startswith("rebuild") for name in names)
     assert {
         "import_geometry",
         "local_sizing",
@@ -59,20 +60,6 @@ def test_human_confirmation_interrupt_can_resume(tmp_path: Path):
     assert paused["__interrupt__"]
     resumed = graph.invoke(Command(resume={"action": "approve", "boundary_roles": {}}), config)
     assert resumed["human_response"]["action"] == "approve"
-
-
-def test_intervention_rebuild_replays_preceding_fluent_steps_before_repair(monkeypatch):
-    from src.nodes import fluent as fluent_nodes
-
-    monkeypatch.setattr(fluent_nodes, "launch_fluent", lambda state: {"error": ""})
-    assert fluent_nodes.rebuild_fluent({}).goto == "import_geometry"
-    pending = fluent_nodes.fluent_step("boundary_layers")(
-        {"pending_repair_after_rebuild": True, "failed_step": "boundary_layers"}
-    )
-    assert pending.goto == "apply_repair"
-    assert fluent_nodes.validate_mesh(
-        {"pending_repair_after_rebuild": True, "failed_step": "final_validation"}
-    ).goto == "apply_repair"
 
 
 def test_zero_repair_budget_stops_without_calling_model(tmp_path: Path):
@@ -230,7 +217,7 @@ def test_gui_editing_window_is_kept_without_final_keep_open(tmp_path, monkeypatc
         }
     )
     assert not result["error"]
-    assert calls[0]["keep_open"] is True
+    assert calls[0]["keep_editor_open"] is True
 
 
 def test_cancel_ends_graph_without_review_or_cad_reload(tmp_path, monkeypatch):
@@ -285,6 +272,8 @@ def test_invalid_repair_routes_stop_before_software(
     outcome = reviewer.execute_repair(
         {
             "failed_step": failed,
+            "error": "native failure",
+            "error_detail": {"code": "FLUENT_OPERATION_FAILED"},
             "repair_rounds": 2,
             "repair_decision": RepairDecision(
                 action=action,
@@ -296,7 +285,9 @@ def test_invalid_repair_routes_stop_before_software(
         }
     )
     assert outcome.goto == "failed"
-    assert "Invalid repair route" in outcome.update["error"]
+    assert "error" not in outcome.update
+    assert outcome.update["repair_stop_reason"] == "invalid_repair_route"
+    assert outcome.update["repair_history"][-1]["application_error"]["error"]
 
 
 @pytest.mark.parametrize(

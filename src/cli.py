@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 from pathlib import Path
@@ -12,7 +11,6 @@ from src.adapters.fluent import has_live_client
 from src.api import (
     close_run_sessions,
     fail_confirmation,
-    get_paused_run,
     inspect_confirmation,
     resume_pipeline,
     run_pipeline,
@@ -49,7 +47,15 @@ def _respond_to_intervention(outcome: dict) -> dict:
             boundary_replacement=replacements[0],
             boundary_replacements=replacements,
         )
-    if kind == "locked_parameter":
+    if kind == "parameter_change":
+        evidence = pause.get("evidence", {})
+        print("Parameter:", evidence.get("repair_action", "unknown"))
+        print("Target:", evidence.get("target", "unknown"))
+        print("Originally requested:", evidence.get("requested_value"), evidence.get("requested_unit", ""))
+        current = evidence.get("current_value")
+        print("Current value:", current if current is not None else "unknown", evidence.get("unit", ""))
+        print("Proposed value:", evidence.get("proposed_value"), evidence.get("unit", ""))
+        print("Reason:", evidence.get("diagnosis", "See run records."))
         choice = input("Type 'accept', a replacement number, or 'cancel': ").strip()
         if choice.lower() == "cancel":
             return resume_pipeline(run_dir=outcome["run_dir"], action="cancel")
@@ -142,38 +148,31 @@ def _parser() -> argparse.ArgumentParser:
         "--fluent-timeout", type=float, default=1800, help="Seconds per worker operation"
     )
     run.add_argument("--spaceclaim-timeout", type=float, default=900)
-    resume = sub.add_parser("resume", help="resume from the human SpaceClaim checkpoint")
-    resume.add_argument("--run-dir", type=Path, required=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        if args.command == "run":
-            outcome = run_pipeline(
-                geometry=args.geometry,
-                prompt_path=args.prompt_file,
-                output_dir=args.output,
-                overwrite=args.overwrite,
-                ui_mode=args.ui_mode,
-                keep_open=args.keep_open,
-                max_repair_rounds=args.max_repair_rounds,
-                runtime_config=RuntimeConfig(
-                    model=args.model,
-                    auth_mode=args.auth_mode,
-                    ansys_root=args.ansys_root,
-                    runtime_root=args.runtime_root,
-                    processor_count=args.processors,
-                    fluent_operation_timeout_s=args.fluent_timeout,
-                    spaceclaim_timeout_s=args.spaceclaim_timeout,
-                ),
-            )
-            outcome = _interactive_resume(outcome, args.keep_open)
-        else:
-            outcome = get_paused_run(args.run_dir)
-            metadata = json.loads((args.run_dir / "run-metadata.json").read_text(encoding="utf-8"))
-            outcome = _interactive_resume(outcome, bool(metadata.get("keep_open")))
+        outcome = run_pipeline(
+            geometry=args.geometry,
+            prompt_path=args.prompt_file,
+            output_dir=args.output,
+            overwrite=args.overwrite,
+            ui_mode=args.ui_mode,
+            keep_open=args.keep_open,
+            max_repair_rounds=args.max_repair_rounds,
+            runtime_config=RuntimeConfig(
+                model=args.model,
+                auth_mode=args.auth_mode,
+                ansys_root=args.ansys_root,
+                runtime_root=args.runtime_root,
+                processor_count=args.processors,
+                fluent_operation_timeout_s=args.fluent_timeout,
+                spaceclaim_timeout_s=args.spaceclaim_timeout,
+            ),
+        )
+        outcome = _interactive_resume(outcome, args.keep_open)
         return 0 if outcome["status"] in {"success", "paused", "cancelled"} else 1
     except Exception as error:
         print(f"[Failed] {type(error).__name__}: {brief(error)}", file=sys.stderr)

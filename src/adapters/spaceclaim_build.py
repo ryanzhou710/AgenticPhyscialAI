@@ -6,13 +6,15 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 from src.config import RuntimeConfig
-from src.services.terminals import resolve_terminal_boundary
+from src.services.errors import PipelineError
+from src.services.terminals import resolve_extraction_selection
 
 from .spaceclaim import SpaceClaimError, SpaceClaimRunner
 from .windows_process import process_creation_time
@@ -103,7 +105,11 @@ class SpaceClaimBuildAdapter:
         result["kept_open"] = bool(keep_open)
         result["record_path"] = str(response)
         if not result.get("ok"):
-            raise SpaceClaimError(result.get("error", f"SpaceClaim {operation} failed"))
+            raise SpaceClaimError(
+                result.get("error", f"SpaceClaim {operation} failed"),
+                detail=result.get("error_detail"),
+                evidence={"native_result": result, "record_path": str(response)},
+            )
         return result
 
     @staticmethod
@@ -153,24 +159,94 @@ class SpaceClaimBuildAdapter:
         selection_plan: dict[str, Any],
         existing_fluid_body: bool = False,
     ) -> dict[str, Any]:
-        terminal_boundaries = {
-            port["candidate_id"]: resolve_terminal_boundary(catalog, port["candidate_id"])
-            for port in selection_plan["openings"]
-        }
-        return self._execute(
-            "extract_volume",
-            {
-                "input": str(Path(source).resolve()),
-                "output": str(Path(output).resolve()),
-                "catalog": catalog,
-                "selection_plan": selection_plan,
-                "existing_fluid_body": existing_fluid_body,
-                "terminal_boundaries": terminal_boundaries,
-            },
-        )
+        selection = resolve_extraction_selection(catalog, selection_plan)
+        strategies = ["existing_fluid_body"] if existing_fluid_body else [
+            "faces" if selection["face_strategy_available"] else "edges"
+        ]
+        if strategies == ["faces"]:
+            strategies.append("edges")
+        attempts: list[dict[str, Any]] = []
+        for index, strategy in enumerate(strategies, start=1):
+            print(
+                f"[Running] Fluid-domain extraction attempt {index}/{len(strategies)}: "
+                + ("face capping" if strategy == "faces" else "edge-contour capping"),
+                flush=True,
+            )
+            try:
+                result = self._execute(
+                    "extract_volume",
+                    {
+                        "input": str(Path(source).resolve()),
+                        "output": str(Path(output).resolve()),
+                        "catalog": catalog,
+                        "terminal_records": selection["terminal_records"],
+                        "seed_face_id": selection["seed_face_id"],
+                        "extraction_strategy": strategy,
+                        "existing_fluid_body": existing_fluid_body,
+                    },
+                )
+                attempts.append({"strategy": strategy, "status": "success"})
+                if len(attempts) > 1:
+                    print(
+                        "[Recovered] Fluid-domain extraction succeeded with "
+                        + ("face capping." if strategy == "faces" else "edge-contour capping."),
+                        flush=True,
+                    )
+                result["extraction_attempts"] = attempts
+                return result
+            except (TimeoutError, FileNotFoundError) as error:
+                attempts.append({"strategy": strategy, "status": "failed", "error": str(error)})
+                raise PipelineError(
+                    "CAD_EXTRACTION_RUNTIME_FAILED",
+                    "The SpaceClaim extraction timed out or its runtime environment is unavailable.",
+                    stage="extract_volume",
+                    substep="volume extraction",
+                    suggested_action="Check the license, SpaceClaim installation, and extraction timeout.",
+                    evidence={"attempts": attempts},
+                ) from error
+            except SpaceClaimError as error:
+                attempts.append(
+                    {"strategy": strategy, "status": "failed", "error": str(error), "detail": error.detail}
+                )
+                non_retryable_codes = {
+                    "CAD_OBJECT_IDENTITY_CHANGED",
+                    "CAD_TEMPORARY_CLEANUP_FAILED",
+                    "CAD_LICENSE_UNAVAILABLE",
+                    "CAD_OPENING_INVALID",
+                }
+                retryable = (
+                    strategy == "faces"
+                    and index < len(strategies)
+                    and error.detail.get("code") not in non_retryable_codes
+                    and not any(
+                        token in str(error).casefold()
+                        for token in ("identity", "unknown", "not planar", "free edges", "license", "cleanup")
+                    )
+                )
+                if retryable:
+                    print(
+                        "[Stage failed; retrying] Face capping failed; retrying the same contours with edge capping.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    continue
+                raise PipelineError(
+                    "CAD_VOLUME_EXTRACT_FAILED",
+                    "SpaceClaim could not create one positive-volume fluid domain from the confirmed openings and seed face.",
+                    stage="extract_volume",
+                    substep="volume extraction",
+                    suggested_action="Check the opening caps, seed location, and extraction-attempt record.",
+                    evidence={"attempts": attempts, **error.evidence},
+                ) from error
+        raise AssertionError("extraction strategies unexpectedly exhausted")
 
     def label_faces(
-        self, *, source: str | Path, output: str | Path, extraction: dict[str, Any], keep_open: bool
+        self,
+        *,
+        source: str | Path,
+        output: str | Path,
+        extraction: dict[str, Any],
+        keep_editor_open: bool,
     ) -> dict[str, Any]:
         return self._execute(
             "label_faces",
@@ -179,5 +255,5 @@ class SpaceClaimBuildAdapter:
                 "output": str(Path(output).resolve()),
                 "extraction": extraction,
             },
-            keep_open=keep_open,
+            keep_open=keep_editor_open,
         )

@@ -87,6 +87,7 @@ VIEW_CONTRACT = {
     "selection_detail": "Selected",
     "selected_projection": "face_normal_or_curve_frame_with_explicit_extent_or_isometric",
 }
+DETAIL_VIEWS = set(["Selected", "OwnerContext", "SelectedProxy"])
 LIVE_OBJECTS = {}
 try:
     STRING_TYPES = (basestring,)
@@ -315,6 +316,7 @@ def build_catalog():
             "start_m": vector3(edge.Shape.StartPoint),
             "end_m": vector3(edge.Shape.EndPoint),
             "face_ids": candidate_ids(edge.Faces, face_ids),
+            "closed": bool(getattr(edge.Shape, "IsClosed", False)) or isinstance(geometry, Circle),
         }
         if isinstance(geometry, Circle):
             row.update(primitive_data(geometry))
@@ -709,13 +711,16 @@ def require_rendered_views(results, expected_views):
             raise ValueError("Required SpaceClaim view was not rendered: " + str(view))
 
 
-def render_views(folder, stem, resolved, views, catalog=None):
+def render_views(folder, stem, resolved, views, catalog=None, detail_views=None):
     ensure_folder(folder)
     all_bodies = list(DocumentHelper.GetRootPart().GetAllBodies())
     selected_faces = []
     selected_edges = []
     overlay_curves = []
     try:
+        requested_detail_views = set(detail_views or ["Selected", "OwnerContext", "SelectedProxy"])
+        if not requested_detail_views.issubset(DETAIL_VIEWS):
+            raise ValueError("Unsupported candidate detail view")
         active = Selection.Empty()
         if resolved:
             all_bodies, selected_faces, selected_edges, overlay_curves = colour_objects(resolved)
@@ -745,6 +750,8 @@ def render_views(folder, stem, resolved, views, catalog=None):
 
         if resolved:
             try:
+                if "Selected" not in requested_detail_views:
+                    raise LookupError("Selected view not requested")
                 verify_active_selection(resolved, catalog)
                 set_selected_projection(
                     selected_faces, selected_edges, active, all_bodies)
@@ -754,13 +761,16 @@ def render_views(folder, stem, resolved, views, catalog=None):
                 verify_active_selection(resolved, catalog)
                 results.append(view_result("Selected", path))
             except Exception:
-                results.append({"view": "Selected", "error": traceback.format_exc()})
+                if "Selected" in requested_detail_views:
+                    results.append({"view": "Selected", "error": traceback.format_exc()})
             # Show the selected face in the context of its owning component.
             # Non-owner bodies are hidden uniformly; no case or face-specific
             # decision is involved.  Internal faces may remain occluded here,
             # which is why the exact one-face proxy is exported separately.
             owner_visibility = []
             try:
+                if "OwnerContext" not in requested_detail_views:
+                    raise LookupError("OwnerContext view not requested")
                 if not selected_faces:
                     raise ValueError(
                         "OwnerContext is only applicable to selected faces")
@@ -789,7 +799,7 @@ def render_views(folder, stem, resolved, views, catalog=None):
                 verify_active_selection(resolved, catalog)
                 results.append(view_result("OwnerContext", path))
             except Exception:
-                if selected_faces:
+                if selected_faces and "OwnerContext" in requested_detail_views:
                     results.append({
                         "view": "OwnerContext", "error": traceback.format_exc()})
             finally:
@@ -806,6 +816,8 @@ def render_views(folder, stem, resolved, views, catalog=None):
             proxy_bodies = []
             proxy_visibility = []
             try:
+                if "SelectedProxy" not in requested_detail_views:
+                    raise LookupError("SelectedProxy view not requested")
                 if not selected_faces:
                     raise ValueError(
                         "SelectedProxy is only applicable to selected faces")
@@ -836,7 +848,7 @@ def render_views(folder, stem, resolved, views, catalog=None):
                 verify_active_selection(resolved, catalog)
                 results.append(view_result("SelectedProxy", path))
             except Exception:
-                if selected_faces:
+                if selected_faces and "SelectedProxy" in requested_detail_views:
                     results.append({
                         "view": "SelectedProxy", "error": traceback.format_exc()})
             finally:

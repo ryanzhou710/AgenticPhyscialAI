@@ -9,7 +9,6 @@ from langgraph.types import Command
 from src import api, cli
 from src.adapters import fluent as transport
 from src.adapters import spaceclaim_build
-from src.services.artifacts import RUN_FORMAT_VERSION
 from src.services.terminal import progress_node
 
 
@@ -71,7 +70,6 @@ def test_handoff_failure_stops_without_resume(monkeypatch, tmp_path, capsys, mes
     metadata = {
         "checkpoint": str(checkpoint),
         "run_id": "handoff-test",
-        "run_format_version": RUN_FORMAT_VERSION,
     }
     (tmp_path / "run-metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
     closed = []
@@ -99,8 +97,9 @@ def test_handoff_failure_stops_without_resume(monkeypatch, tmp_path, capsys, mes
         },
         as_node="validate_cad",
     )
-    assert graph.invoke(None, config)["__interrupt__"]
-    outcome = api.get_paused_run(tmp_path)
+    execution = graph.invoke(None, config)
+    assert execution["__interrupt__"]
+    outcome = api._outcome(execution, tmp_path)
     monkeypatch.setattr("builtins.input", lambda prompt: "yes")
 
     def fail(*args, **kwargs):
@@ -118,19 +117,19 @@ def test_handoff_failure_stops_without_resume(monkeypatch, tmp_path, capsys, mes
     snapshot = graph.get_state(config)
     assert snapshot.values["status"] == "failed"
     assert snapshot.values["repair_rounds"] == 2
+    assert snapshot.values["error_detail"] == result["result"]["error_detail"]
+    assert snapshot.values["error_evidence"] == result["result"]["error_evidence"]
     assert snapshot.next == ()
     assert not (tmp_path / "pause.json").exists()
-    with pytest.raises(ValueError, match="no pending confirmation"):
-        api.get_paused_run(tmp_path)
     assert "Fluent was not started" not in capsys.readouterr().out
 
 
 def test_summary_printed_before_keep_open_wait(monkeypatch, tmp_path, capsys):
     def wait():
         output = capsys.readouterr().out
-        assert "Overall status: Success" in output
+        assert "success" in output
         assert "mesh.msh.h5" in output
-        assert "Diagnosis rounds: 2" in output
+        assert "2" in output
         return False
 
     closed = []
@@ -149,19 +148,16 @@ def test_summary_printed_before_keep_open_wait(monkeypatch, tmp_path, capsys):
     assert closed == [str(tmp_path)]
 
 
-def test_resume_command_uses_same_yes_no(monkeypatch, tmp_path):
-    (tmp_path / "run-metadata.json").write_text(json.dumps({"keep_open": False}))
-    monkeypatch.setattr(cli, "get_paused_run", lambda path: paused(tmp_path))
-    monkeypatch.setattr("builtins.input", lambda message: "no")
-    calls = []
-    monkeypatch.setattr(
-        cli, "resume_pipeline", lambda **kw: calls.append(kw) or {"status": "cancelled"}
-    )
-    assert cli.main(["resume", "--run-dir", str(tmp_path)]) == 0
-    assert calls[0]["action"] == "cancel"
+def test_resume_command_is_rejected(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "run_pipeline", lambda **kwargs: pytest.fail("must not start a run"))
+    with pytest.raises(SystemExit) as error:
+        cli.main(["resume", "--run-dir", str(tmp_path)])
+    assert error.value.code == 2
 
 
 def test_progress_does_not_change_results_or_call_diagnosis_a_repair(capsys):
+    from src.services import terminal
+
     diagnosis = {"repair_decision": {"action": "set_layer_count", "diagnosis": "Wrong layer count"}}
     assert (
         progress_node("review_failure", lambda state: diagnosis)({"error": "old error"})
@@ -173,8 +169,9 @@ def test_progress_does_not_change_results_or_call_diagnosis_a_repair(capsys):
         {"failed_step": "boundary_layers", "repair_rounds": 1}
     )
     output = capsys.readouterr().out
-    assert "[Done] Diagnosis:" in output and "Recovery is not yet verified" in output
-    assert "(rerun)" in output
+    assert "Wrong layer count" in output
+    assert terminal.LABELS["boundary_layers"] in output
+    assert terminal._RECOVERED in output
     assert "repair successful" not in output.lower()
 
 
@@ -186,15 +183,33 @@ def test_failed_terminal_node_never_says_complete(capsys):
 def test_inspect_saves_before_fresh_read_and_reuses_roles(monkeypatch, tmp_path):
     from src.services.geometry_models import GeometryCatalog
 
-    catalog = GeometryCatalog.model_construct(
+    catalog = GeometryCatalog(
+        catalog_id="confirmed",
+        geometry_id="working",
+        bodies=[
+            {
+                "id": "B1",
+                "kind": "body",
+                "solid_or_sheet": "solid",
+                "volume_m3": 1.0,
+                "face_ids": ["F1", "F2"],
+            }
+        ],
+        faces=[
+            {"id": "F1", "kind": "face", "body_id": "B1"},
+            {"id": "F2", "kind": "face", "body_id": "B1"},
+        ],
+        edges=[
+            {"id": "E1", "kind": "edge", "body_id": "B1", "face_ids": ["F1", "F2"]}
+        ],
         native_catalog={
             "internal": {
                 "raw_groups": [
-                    {"raw_name": "in", "member_ids": ["a"]},
-                    {"raw_name": "out", "member_ids": ["b"]},
+                    {"raw_name": "in", "member_ids": ["F1"]},
+                    {"raw_name": "out", "member_ids": ["F2"]},
                 ]
             }
-        }
+        },
     )
     events = []
     state = {
@@ -204,9 +219,7 @@ def test_inspect_saves_before_fresh_read_and_reuses_roles(monkeypatch, tmp_path)
         "boundary_roles": {"in": "inlet", "out": "outlet"},
     }
     (tmp_path / "run-metadata.json").write_text(
-        json.dumps(
-            {"checkpoint": "unused", "run_id": "run", "run_format_version": RUN_FORMAT_VERSION}
-        )
+        json.dumps({"checkpoint": "unused", "run_id": "run"})
     )
     monkeypatch.setattr(
         api,
@@ -281,13 +294,12 @@ def test_save_timeout_sends_only_one_request(monkeypatch, tmp_path):
     assert len(list(tmp_path.glob("request.json"))) == 1
 
 
-def test_checkpoint_resume_reads_actual_interrupt_and_no_ends_graph(tmp_path):
+def test_current_run_pause_can_be_cancelled(tmp_path):
     checkpoint = tmp_path / "checkpoints.sqlite"
     metadata = {
         "checkpoint": str(checkpoint),
         "run_id": "pause-test",
         "max_repair_rounds": 10,
-        "run_format_version": RUN_FORMAT_VERSION,
     }
     (tmp_path / "run-metadata.json").write_text(json.dumps(metadata))
     graph = api.build_graph(checkpoint)
@@ -305,23 +317,20 @@ def test_checkpoint_resume_reads_actual_interrupt_and_no_ends_graph(tmp_path):
         },
         as_node="validate_cad",
     )
-    assert graph.invoke(None, config)["__interrupt__"]
-    (tmp_path / "pause.json").write_text(json.dumps({"interrupt": {"working_geometry": "stale"}}))
-    outcome = api.get_paused_run(tmp_path)
+    execution = graph.invoke(None, config)
+    assert execution["__interrupt__"]
+    outcome = api._outcome(execution, tmp_path)
     assert outcome["interrupt"]["working_geometry"] == "actual-working.scdoc"
     assert outcome["repair_rounds"] == 3
     assert api.resume_pipeline(run_dir=tmp_path, action="cancel")["status"] == "cancelled"
-    with pytest.raises(ValueError, match="no pending confirmation"):
-        api.get_paused_run(tmp_path)
+    assert graph.get_state(config).next == ()
 
 
 @pytest.mark.parametrize("ui_mode", ["gui", "hidden"])
 def test_confirmation_save_failure_never_opens_disk_copy(monkeypatch, tmp_path, ui_mode):
     state = {"working_geometry": "working.scdoc", "ui_mode": ui_mode, "labeling": {}}
     (tmp_path / "run-metadata.json").write_text(
-        json.dumps(
-            {"checkpoint": "unused", "run_id": "run", "run_format_version": RUN_FORMAT_VERSION}
-        )
+        json.dumps({"checkpoint": "unused", "run_id": "run"})
     )
     monkeypatch.setattr(
         api,

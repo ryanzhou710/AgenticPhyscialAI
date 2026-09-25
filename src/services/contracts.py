@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -42,6 +43,70 @@ class CadSelectionPlan(BaseModel):
         return self
 
 
+DetailView = Literal["Selected", "OwnerContext", "SelectedProxy"]
+
+
+class CandidateDetailRequest(BaseModel):
+    """One candidate whose visual evidence is needed before final selection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: str
+    purpose: Literal["opening", "seed"]
+    views: list[DetailView] = Field(default_factory=list)
+    reason: str
+
+    @field_validator("views")
+    @classmethod
+    def views_are_unique(cls, value):
+        if len(value) != len(set(value)):
+            raise ValueError("detail views must be unique")
+        return value
+
+
+class CadSelectionScreening(BaseModel):
+    """First LLM pass: request visual evidence without making a final selection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["needs_details", "ambiguous", "not_found"]
+    reference_view: Literal["Front", "Back", "Top", "Bottom", "Right", "Left", "Isometric"]
+    candidates: list[CandidateDetailRequest] = Field(default_factory=list)
+    explanation: str
+    missing_information: list[str] = Field(default_factory=list)
+    fluid_domain_action: Literal["extract", "reuse", "ambiguous"] = "extract"
+    fluid_domain_evidence: str = ""
+
+    @model_validator(mode="after")
+    def needs_details_has_candidates(self):
+        if self.status == "needs_details" and not self.candidates:
+            raise ValueError("needs_details requires at least one candidate")
+        return self
+
+
+class CadSelectionReview(BaseModel):
+    """LLM decision after examining only the requested candidate detail images."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["selected", "needs_details", "ambiguous", "not_found"]
+    selection: CadSelectionPlan | None = None
+    detail_requests: list[CandidateDetailRequest] = Field(default_factory=list)
+    explanation: str
+    missing_information: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def review_has_consistent_payload(self):
+        if self.status == "selected":
+            if self.selection is None or self.selection.status != "selected":
+                raise ValueError("selected review requires a selected final plan")
+        elif self.status == "needs_details" and not self.detail_requests:
+            raise ValueError("needs_details review requires detail_requests")
+        elif self.selection is not None:
+            raise ValueError("only selected review may include selection")
+        return self
+
+
 class NumericControl(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -49,7 +114,6 @@ class NumericControl(BaseModel):
     unit: Literal["m", "cm", "mm", "in", "ft"]
     source: Literal["user", "inferred"]
     basis: str
-    locked: bool = False
 
 
 class LocalRefinement(BaseModel):
@@ -67,10 +131,8 @@ class BoundaryLayerRequest(BaseModel):
     boundary_names: list[str] | None = None
     layers: int | None = None
     layers_source: Literal["user", "inferred"] | None = None
-    layers_locked: bool = False
     growth_rate: float | None = None
     growth_rate_source: Literal["user", "inferred"] | None = None
-    growth_rate_locked: bool = False
     first_layer_height: NumericControl | None = None
 
     @model_validator(mode="after")
@@ -81,10 +143,6 @@ class BoundaryLayerRequest(BaseModel):
             raise ValueError("layers and layers_source must be supplied together")
         if (self.growth_rate is None) != (self.growth_rate_source is None):
             raise ValueError("growth_rate and growth_rate_source must be supplied together")
-        if self.layers_locked and self.layers is None:
-            raise ValueError("layers_locked requires an explicit layer count")
-        if self.growth_rate_locked and self.growth_rate is None:
-            raise ValueError("growth_rate_locked requires an explicit growth rate")
         return self
 
 
@@ -143,24 +201,125 @@ class ZoneReferenceParameters(BaseModel):
     new: str
 
 
-REPAIR_PARAMETERS = {
-    "retry_step": EmptyRepairParameters,
-    "replace_object_reference": ObjectReferenceParameters,
-    "set_global_size": ValueParameters,
-    "set_local_size": LocalSizeParameters,
-    "set_growth_rate": ValueParameters,
-    "set_layer_count": LayerCountParameters,
-    "set_first_layer_height": ValueParameters,
-    "set_layer_targets": LayerTargetsParameters,
-    "enable_quality_improvement": EmptyRepairParameters,
-    "replace_zone_reference": ZoneReferenceParameters,
-    "return_to_human": EmptyRepairParameters,
-    "stop": EmptyRepairParameters,
+@dataclass(frozen=True)
+class RepairActionSpec:
+    parameters: type[BaseModel]
+    route: Literal["retry", "cad", "fluent", "human", "stop"]
+    resume_step: str | None = None
+    approval: Literal["none", "user_parameter", "boundary_mapping"] = "none"
+    user_parameter: Literal[
+        "global_size", "local_size", "growth_rate", "layer_count", "first_layer_height"
+    ] | None = None
+    worker_handler: str | None = None
+    resume_parameter: str | None = None
+    resume_values: tuple[tuple[str, str], ...] = ()
+
+    def resume_for(self, parameters: dict[str, Any]) -> str | None:
+        if self.resume_step is not None:
+            return self.resume_step
+        if self.resume_parameter is None:
+            return None
+        value = str(parameters[self.resume_parameter])
+        try:
+            return dict(self.resume_values)[value]
+        except KeyError as error:
+            raise ValueError(
+                f"Unsupported {self.resume_parameter} for repair routing: {value}"
+            ) from error
+
+
+REPAIR_ACTIONS: dict[str, RepairActionSpec] = {
+    "retry_step": RepairActionSpec(
+        EmptyRepairParameters, route="retry", worker_handler="_apply_retry"
+    ),
+    "replace_object_reference": RepairActionSpec(ObjectReferenceParameters, route="cad"),
+    "set_global_size": RepairActionSpec(
+        ValueParameters,
+        route="fluent",
+        resume_step="surface_mesh",
+        approval="user_parameter",
+        user_parameter="global_size",
+        worker_handler="_apply_global_size",
+    ),
+    "set_local_size": RepairActionSpec(
+        LocalSizeParameters,
+        route="fluent",
+        resume_step="local_sizing",
+        approval="user_parameter",
+        user_parameter="local_size",
+        worker_handler="_apply_local_size",
+    ),
+    "set_growth_rate": RepairActionSpec(
+        ValueParameters,
+        route="fluent",
+        resume_step="boundary_layers",
+        approval="user_parameter",
+        user_parameter="growth_rate",
+        worker_handler="_apply_growth_rate",
+    ),
+    "set_layer_count": RepairActionSpec(
+        LayerCountParameters,
+        route="fluent",
+        resume_step="boundary_layers",
+        approval="user_parameter",
+        user_parameter="layer_count",
+        worker_handler="_apply_layer_count",
+    ),
+    "set_first_layer_height": RepairActionSpec(
+        ValueParameters,
+        route="fluent",
+        resume_step="boundary_layers",
+        approval="user_parameter",
+        user_parameter="first_layer_height",
+        worker_handler="_apply_first_layer_height",
+    ),
+    "set_layer_targets": RepairActionSpec(
+        LayerTargetsParameters,
+        route="fluent",
+        resume_step="boundary_layers",
+        approval="boundary_mapping",
+        worker_handler="_apply_layer_targets",
+    ),
+    "enable_quality_improvement": RepairActionSpec(
+        EmptyRepairParameters,
+        route="fluent",
+        resume_step="surface_mesh",
+        worker_handler="_apply_quality_improvement",
+    ),
+    "replace_zone_reference": RepairActionSpec(
+        ZoneReferenceParameters,
+        route="fluent",
+        approval="boundary_mapping",
+        worker_handler="_apply_zone_reference",
+        resume_parameter="category",
+        resume_values=(
+            ("boundaries.inlet", "update_boundaries"),
+            ("boundaries.outlet", "update_boundaries"),
+            ("boundaries.wall", "update_boundaries"),
+            ("boundaries.symmetry", "update_boundaries"),
+            ("boundary_layers", "boundary_layers"),
+            ("local_refinements", "local_sizing"),
+        ),
+    ),
+    "return_to_human": RepairActionSpec(EmptyRepairParameters, route="human"),
+    "stop": RepairActionSpec(EmptyRepairParameters, route="stop"),
 }
 
 
+def repair_action_spec(action: str) -> RepairActionSpec:
+    try:
+        return REPAIR_ACTIONS[action]
+    except KeyError as error:
+        raise ValueError("Unsupported repair action: " + action) from error
+
+
 def repair_tool_catalog() -> dict[str, Any]:
-    return {name: parameters.model_json_schema() for name, parameters in REPAIR_PARAMETERS.items()}
+    return {
+        name: spec.parameters.model_json_schema() for name, spec in REPAIR_ACTIONS.items()
+    }
+
+
+RepairAction = Literal[*tuple(REPAIR_ACTIONS)]
 
 
 class RepairDecision(BaseModel):
@@ -168,20 +327,7 @@ class RepairDecision(BaseModel):
 
     diagnosis: str
     evidence: str
-    action: Literal[
-        "retry_step",
-        "replace_object_reference",
-        "set_global_size",
-        "set_local_size",
-        "set_growth_rate",
-        "set_layer_count",
-        "set_first_layer_height",
-        "set_layer_targets",
-        "enable_quality_improvement",
-        "replace_zone_reference",
-        "return_to_human",
-        "stop",
-    ]
+    action: RepairAction
     target_step: Literal[
         "prepare",
         "query_geometry",
@@ -207,7 +353,7 @@ class RepairDecision(BaseModel):
 
     @model_validator(mode="after")
     def parameters_match_tool(self):
-        REPAIR_PARAMETERS[self.action].model_validate(self.parameters)
+        repair_action_spec(self.action).parameters.model_validate(self.parameters)
         return self
 
 

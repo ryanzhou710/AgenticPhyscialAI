@@ -91,15 +91,7 @@ class FluentWorker:
             )
             self.runner.record_repair(action, data.get("parameters", {}))
             resume = target if action == "retry_step" else earliest
-            reverted = (
-                {
-                    "step": resume,
-                    "reverted": False,
-                    "reason": "Fresh Fluent session replayed the preceding workflow steps.",
-                }
-                if data.get("skip_revert")
-                else self.runner.revert_from(resume)
-            )
+            reverted = self.runner.revert_from(resume)
             return {
                 "resume": resume,
                 "description": description,

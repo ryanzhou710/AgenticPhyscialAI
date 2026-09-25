@@ -12,8 +12,6 @@ from typing import Any
 
 from src.config import RuntimeConfig
 
-RUN_FORMAT_VERSION = 2
-
 RUN_OUTPUT_NAMES = (
     "artifacts",
     "llm",

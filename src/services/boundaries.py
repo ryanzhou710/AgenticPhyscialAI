@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from src.services.errors import PipelineError
 from src.services.geometry_models import GeometryCatalog
 from src.services.units import control_in_metres
 
@@ -47,6 +48,130 @@ def confirm_roles(
     if not any(role == "outlet" for role in roles.values()):
         raise ValueError("Confirmed groups contain no outlet")
     return roles
+
+
+def validate_confirmed_cad(
+    *, catalog: GeometryCatalog, roles: dict[str, str]
+) -> dict[str, Any]:
+    """Validate the actual saved CAD before Fluent receives it.
+
+    SpaceClaim groups are editable during human confirmation.  Verify the
+    topological and grouping invariants again from a fresh catalog rather than
+    trusting the groups produced before the handoff pause.
+    """
+
+    bodies = list(catalog.bodies)
+    positive = [
+        body
+        for body in bodies
+        if body.solid_or_sheet == "solid" and (body.volume_m3 or 0.0) > 0.0
+    ]
+    if len(bodies) != 1 or len(positive) != 1:
+        raise PipelineError(
+            "CAD_CONFIRMED_SOLID_INVALID",
+            "The confirmed CAD must contain exactly one positive-volume solid.",
+            stage="reload_confirmed_cad",
+            substep="solid validation",
+            objects=[{"candidate_id": body.id} for body in bodies],
+            suggested_action="Remove extra bodies or repair zero-volume bodies, then save the CAD again.",
+            evidence={
+                "body_count": len(bodies),
+                "positive_solid_ids": [body.id for body in positive],
+            },
+        )
+    body = positive[0]
+    free_edges = [
+        edge.id for edge in catalog.edges
+        if edge.body_id == body.id and len(edge.face_ids) != 2
+    ]
+    if free_edges:
+        raise PipelineError(
+            "CAD_CONFIRMED_OPEN_TOPOLOGY",
+            "The confirmed fluid body has free edges and is not closed.",
+            stage="reload_confirmed_cad",
+            substep="topology validation",
+            objects=[{"candidate_id": edge_id} for edge_id in free_edges],
+            suggested_action="Close every opening in SpaceClaim and save the CAD again.",
+            evidence={"free_edge_ids": free_edges},
+        )
+
+    groups = named_groups(catalog)
+    if set(groups) != set(roles):
+        raise PipelineError(
+            "CAD_CONFIRMED_GROUP_ROLE_MISMATCH",
+            "The confirmed boundary groups do not match the confirmed role names.",
+            stage="reload_confirmed_cad",
+            substep="boundary-group validation",
+            suggested_action="Assign roles again for every current boundary group.",
+            evidence={"group_names": sorted(groups), "role_names": sorted(roles)},
+        )
+    face_ids = {face.id for face in catalog.faces if face.body_id == body.id}
+    assigned: dict[str, str] = {}
+    for name, members in groups.items():
+        if not members:
+            raise PipelineError(
+                "CAD_CONFIRMED_GROUP_EMPTY",
+                "A confirmed boundary group is empty.",
+                stage="reload_confirmed_cad",
+                substep="boundary-group validation",
+                objects=[{"name": name, "role": roles.get(name, "")}],
+                suggested_action="Add fluid-body faces to that group, or remove the empty group and confirm roles again.",
+            )
+        non_faces = [member for member in members if member not in face_ids]
+        if non_faces:
+            raise PipelineError(
+                "CAD_CONFIRMED_GROUP_MEMBER_INVALID",
+                "A confirmed boundary group contains an object outside the fluid body.",
+                stage="reload_confirmed_cad",
+                substep="boundary-group validation",
+                objects=[{"name": name, "candidate_id": member} for member in non_faces],
+                suggested_action="Boundary groups may contain only faces from the fluid body.",
+            )
+        overlap = [member for member in members if member in assigned]
+        if overlap:
+            raise PipelineError(
+                "CAD_CONFIRMED_GROUP_OVERLAP",
+                "Confirmed boundary groups contain overlapping faces.",
+                stage="reload_confirmed_cad",
+                substep="boundary-group validation",
+                objects=[
+                    {"name": assigned[member], "candidate_id": member}
+                    for member in overlap
+                ] + [{"name": name, "candidate_id": member} for member in overlap],
+                suggested_action="Assign each fluid face to exactly one boundary group.",
+            )
+        assigned.update({member: name for member in members})
+    missing_faces = sorted(face_ids - set(assigned))
+    if missing_faces:
+        raise PipelineError(
+            "CAD_CONFIRMED_GROUP_COVERAGE_INCOMPLETE",
+            "Confirmed boundary groups do not cover every fluid face.",
+            stage="reload_confirmed_cad",
+            substep="boundary-group validation",
+            objects=[{"candidate_id": face_id} for face_id in missing_faces],
+            suggested_action="Assign every ungrouped fluid face to an inlet, outlet, wall, or symmetry group.",
+        )
+    if not any(role == "inlet" for role in roles.values()) or not any(
+        role == "outlet" for role in roles.values()
+    ):
+        raise PipelineError(
+            "CAD_CONFIRMED_TERMINAL_ROLE_MISSING",
+            "Confirmed boundary groups must include both inlet and outlet roles.",
+            stage="reload_confirmed_cad",
+            substep="boundary-role validation",
+            suggested_action="Set one group to inlet and another group to outlet.",
+        )
+    return {
+        "positive_volume": True,
+        "no_reported_free_edges": True,
+        "nonempty_groups": True,
+        "nonoverlapping_groups": True,
+        "all_faces_grouped": True,
+        "roles_complete": True,
+        "body_id": body.id,
+        "face_count": len(face_ids),
+        "group_count": len(groups),
+    }
 
 
 def build_fluent_job(
@@ -107,13 +232,13 @@ def rebind_mesh_targets(
     *,
     requirements: dict,
     previous_groups: list[dict],
-    confirmed: GeometryCatalog,
+    confirmed_catalog: GeometryCatalog,
     roles: dict[str, str],
 ) -> dict:
     """Preserve identity across group renames, never infer a different face set."""
     result = copy.deepcopy(requirements)
-    groups = named_groups(confirmed)
-    objects = confirmed.by_id()
+    groups = named_groups(confirmed_catalog)
+    objects = confirmed_catalog.by_id()
     current = {
         name: {objects[item].moniker for item in members if item in objects}
         for name, members in groups.items()
