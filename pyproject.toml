@@ -25,7 +25,10 @@ dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
 cfd-agent = "src.cli:main"
 
 [tool.setuptools]
-packages = ["src", "src.adapters", "src.nodes", "src.services", "src.workers"]
+packages = [
+  "src", "src.adapters", "src.nodes", "src.services", "src.workers",
+  "src.workers.spaceclaim", "src.workers.fluent",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -37,7 +40,7 @@ line-length = 100
 extend-exclude = [
   ".wheel-venv/",
   "examples/",
-  "src/workers/spaceclaim*_v241.py",
+  "src/workers/spaceclaim/",
   "tests/integration/native_*_fixture_v241.py",
 ]
 

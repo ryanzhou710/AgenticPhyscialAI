@@ -1,4 +1,4 @@
-"""Targeted terminal/confirmation tests; no model or Ansys is launched."""
+"""CAD confirmation, saved-document handoff and boundary group validation."""
 
 import json
 from types import SimpleNamespace
@@ -9,7 +9,10 @@ from langgraph.types import Command
 from src import api, cli
 from src.adapters import fluent as transport
 from src.adapters import spaceclaim_build
-from src.services.terminal import progress_node
+from src.services.boundaries import validate_confirmed_cad
+from src.services.cli_output import progress_node
+from src.services.errors import PipelineError
+from src.services.geometry_catalog import GeometryCatalog
 
 
 def paused(tmp_path):
@@ -156,7 +159,7 @@ def test_resume_command_is_rejected(monkeypatch, tmp_path):
 
 
 def test_progress_does_not_change_results_or_call_diagnosis_a_repair(capsys):
-    from src.services import terminal
+    from src.services import cli_output
 
     diagnosis = {"repair_decision": {"action": "set_layer_count", "diagnosis": "Wrong layer count"}}
     assert (
@@ -170,8 +173,8 @@ def test_progress_does_not_change_results_or_call_diagnosis_a_repair(capsys):
     )
     output = capsys.readouterr().out
     assert "Wrong layer count" in output
-    assert terminal.LABELS["boundary_layers"] in output
-    assert terminal._RECOVERED in output
+    assert cli_output.LABELS["boundary_layers"] in output
+    assert cli_output._RECOVERED in output
     assert "repair successful" not in output.lower()
 
 
@@ -181,7 +184,7 @@ def test_failed_terminal_node_never_says_complete(capsys):
 
 
 def test_inspect_saves_before_fresh_read_and_reuses_roles(monkeypatch, tmp_path):
-    from src.services.geometry_models import GeometryCatalog
+    from src.services.geometry_catalog import GeometryCatalog
 
     catalog = GeometryCatalog(
         catalog_id="confirmed",
@@ -354,3 +357,69 @@ def test_confirmation_save_failure_never_opens_disk_copy(monkeypatch, tmp_path, 
     ):
         api.inspect_confirmation(tmp_path, save_current=True)
     assert events == (["save"] if ui_mode == "gui" else ["read"])
+
+
+def confirmed_catalog(groups):
+    return GeometryCatalog(
+        catalog_id="confirmed",
+        geometry_id="fluid",
+        bodies=[
+            {"id": "B1", "kind": "body", "solid_or_sheet": "solid", "volume_m3": 1.0,
+             "face_ids": ["F1", "F2", "F3"]}
+        ],
+        faces=[
+            {"id": "F1", "kind": "face", "body_id": "B1"},
+            {"id": "F2", "kind": "face", "body_id": "B1"},
+            {"id": "F3", "kind": "face", "body_id": "B1"},
+        ],
+        edges=[
+            {"id": "E1", "kind": "edge", "body_id": "B1", "face_ids": ["F1", "F2"]},
+            {"id": "E2", "kind": "edge", "body_id": "B1", "face_ids": ["F2", "F3"]},
+        ],
+        native_catalog={"internal": {"raw_groups": groups}},
+    )
+
+
+def roles():
+    return {"in": "inlet", "out": "outlet", "wall": "wall"}
+
+
+def valid_groups():
+    return [
+        {"raw_name": "in", "member_ids": ["F1"]},
+        {"raw_name": "out", "member_ids": ["F2"]},
+        {"raw_name": "wall", "member_ids": ["F3"]},
+    ]
+
+
+def test_confirmed_cad_requires_closed_full_nonoverlapping_groups():
+    result = validate_confirmed_cad(catalog=confirmed_catalog(valid_groups()), roles=roles())
+    assert result["all_faces_grouped"] is True
+    assert result["roles_complete"] is True
+
+
+@pytest.mark.parametrize(
+    ("groups", "code"),
+    [
+        (
+            [
+                {"raw_name": "in", "member_ids": ["F1"]},
+                {"raw_name": "out", "member_ids": ["F2"]},
+                {"raw_name": "wall", "member_ids": []},
+            ],
+            "CAD_CONFIRMED_GROUP_EMPTY",
+        ),
+        (
+            [
+                {"raw_name": "in", "member_ids": ["F1"]},
+                {"raw_name": "out", "member_ids": ["F2", "F3"]},
+                {"raw_name": "wall", "member_ids": ["F3"]},
+            ],
+            "CAD_CONFIRMED_GROUP_OVERLAP",
+        ),
+    ],
+)
+def test_confirmed_cad_blocks_invalid_group_edits(groups, code):
+    with pytest.raises(PipelineError) as error:
+        validate_confirmed_cad(catalog=confirmed_catalog(groups), roles=roles())
+    assert error.value.detail["code"] == code

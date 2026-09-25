@@ -57,12 +57,12 @@ try:
                         "images": [],
                     }
 
-                    # Direct edge selection is executable only for the legacy
-                    # single circular open-edge representation.  Keep every
+                    # Direct edge selection is executable only for a closed
+                    # single-face open-edge representation.  Keep every
                     # edge in the topology catalog, but do not render unrelated
                     # seam/straight edges as visual opening candidates.
                     if (collection == "edges" and
-                            (row.get("curve_type") != "Circle" or
+                            (row.get("closed") is not True or
                              len(row.get("face_ids", [])) != 1)):
                         candidate_result["status"] = "skipped"
                         candidate_result["reason"] = "not_a_supported_opening_edge"

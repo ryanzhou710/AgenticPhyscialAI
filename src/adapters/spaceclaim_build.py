@@ -14,9 +14,9 @@ from typing import Any
 
 from src.config import RuntimeConfig
 from src.services.errors import PipelineError
-from src.services.terminals import resolve_extraction_selection
+from src.services.openings import resolve_extraction_selection
 
-from .spaceclaim import SpaceClaimError, SpaceClaimRunner
+from .spaceclaim_query import SpaceClaimError, SpaceClaimRunner
 from .windows_process import process_creation_time
 
 
@@ -33,13 +33,13 @@ class SpaceClaimBuildAdapter:
         self.ui_mode = ui_mode
         self.config = config or RuntimeConfig()
         self.timeout_s = timeout_s if timeout_s is not None else self.config.spaceclaim_timeout_s
-        workers = Path(__file__).resolve().parents[1] / "workers"
-        self.script = self.runtime_dir / "spaceclaim-build-v241.py"
-        shutil.copy2(workers / "spaceclaim_build_v241.py", self.script)
-        self.common_script = self.runtime_dir / "spaceclaim_common_v241.py"
-        shutil.copy2(workers / "spaceclaim_common_v241.py", self.common_script)
-        self.save_script = self.runtime_dir / "spaceclaim_save_v241.py"
-        shutil.copy2(workers / "spaceclaim_save_v241.py", self.save_script)
+        workers = Path(__file__).resolve().parents[1] / "workers" / "spaceclaim"
+        self.script = self.runtime_dir / "build.py"
+        shutil.copy2(workers / "build.py", self.script)
+        self.common_script = self.runtime_dir / "common.py"
+        shutil.copy2(workers / "common.py", self.common_script)
+        self.save_script = self.runtime_dir / "save.py"
+        shutil.copy2(workers / "save.py", self.save_script)
 
     def _execute(
         self, operation: str, payload: dict[str, Any], *, keep_open: bool = False

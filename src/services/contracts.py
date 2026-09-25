@@ -110,8 +110,9 @@ class CadSelectionReview(BaseModel):
 class NumericControl(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    value: float
-    unit: Literal["m", "cm", "mm", "in", "ft"]
+    value: float = Field(gt=0, allow_inf_nan=False)
+    unit: Literal["m"]
+    original_expression: str = ""
     source: Literal["user", "inferred"]
     basis: str
 
@@ -156,6 +157,8 @@ class MeshRequirements(BaseModel):
     boundary_layers: BoundaryLayerRequest | None = None
     volume_method: Literal["poly-hexcore"] = "poly-hexcore"
     notes: list[str] = Field(default_factory=list)
+    missing_information: list[str] = Field(default_factory=list)
+    unsupported_requirements: list[str] = Field(default_factory=list)
 
 
 class EmptyRepairParameters(BaseModel):

@@ -17,7 +17,7 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from src.config import RuntimeConfig
-from src.services.geometry_models import GeometryCatalog, SelectionExecution
+from src.services.geometry_catalog import GeometryCatalog, SelectionExecution
 
 DEFAULT_EVIDENCE_VIEWS = ("Front", "Top", "Right", "Isometric")
 ALLOWED_EVIDENCE_VIEWS = frozenset(
@@ -63,7 +63,7 @@ class SpaceClaimRunner:
         self.ui_mode = ui_mode
         self.config = config or RuntimeConfig()
         self.timeout_s = timeout_s if timeout_s is not None else self.config.spaceclaim_timeout_s
-        self.script = Path(__file__).resolve().parents[1] / "workers" / "spaceclaim_v241.py"
+        self.script = Path(__file__).resolve().parents[1] / "workers" / "spaceclaim" / "query.py"
         # Every invocation owns a separate ASCII-only directory.  This avoids
         # response/image races when one runner is used from concurrent tasks.
         self._stages: set[Path] = set()
@@ -295,8 +295,8 @@ class SpaceClaimRunner:
             shutil.copy2(geometry_path, staged_geometry)
             shutil.copy2(self.script, staged_script)
             shutil.copy2(
-                self.script.with_name("spaceclaim_common_v241.py"),
-                stage / "spaceclaim_common_v241.py",
+                self.script.with_name("common.py"),
+                stage / "common.py",
             )
             payload = {
                 **request_data,
@@ -314,7 +314,7 @@ class SpaceClaimRunner:
             environment = dict(
                 os.environ,
                 SPACECLAIM_GROUNDING_REQUEST=str(request_path),
-                CFD_AGENT_SC_COMMON=str(stage / "spaceclaim_common_v241.py"),
+                CFD_AGENT_SC_COMMON=str(stage / "common.py"),
             )
             args = [
                 str(self.executable(self.config)),
@@ -502,7 +502,6 @@ class SpaceClaimRunner:
 
         geometry_stem = Path(geometry_path).stem
         raw = {
-            "schema_version": 1,
             "catalog_id": uuid.uuid4().hex,
             "geometry_id": geometry_stem,
             "coordinate_unit": public.get("coordinate_unit", "m"),

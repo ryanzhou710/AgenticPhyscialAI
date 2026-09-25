@@ -13,8 +13,8 @@ from typing import Any, Callable
 from src.services.artifacts import write_json
 from src.services.units import METRES_PER_UNIT
 
-from .mesh_job import MeshJob
-from .repair_protocol import STEP_ORDER, RepairState
+from .job import MeshJob
+from .repair import STEP_ORDER, RepairState
 
 
 def utc_now() -> str:

@@ -8,8 +8,8 @@ from typing import Any
 from langgraph.types import Command
 
 from src.adapters.fluent import close_client, has_live_client
-from src.adapters.spaceclaim import SpaceClaimRunner
 from src.adapters.spaceclaim_build import SpaceClaimBuildAdapter
+from src.adapters.spaceclaim_query import SpaceClaimRunner
 from src.config import RuntimeConfig, config_from_state
 from src.graph import build_graph as _build_graph
 from src.services.artifacts import create_run_directory, load_json, write_json

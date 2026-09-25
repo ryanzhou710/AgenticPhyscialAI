@@ -16,7 +16,7 @@ from src.api import (
     run_pipeline,
 )
 from src.config import PRODUCTION_MODEL, RuntimeConfig
-from src.services.terminal import brief, show_outcome
+from src.services.cli_output import brief, show_outcome
 
 
 def _respond_to_intervention(outcome: dict) -> dict:
@@ -52,6 +52,8 @@ def _respond_to_intervention(outcome: dict) -> dict:
         print("Parameter:", evidence.get("repair_action", "unknown"))
         print("Target:", evidence.get("target", "unknown"))
         print("Originally requested:", evidence.get("requested_value"), evidence.get("requested_unit", ""))
+        if evidence.get("original_expression"):
+            print("Original expression:", evidence["original_expression"])
         current = evidence.get("current_value")
         print("Current value:", current if current is not None else "unknown", evidence.get("unit", ""))
         print("Proposed value:", evidence.get("proposed_value"), evidence.get("unit", ""))
@@ -144,6 +146,8 @@ def _parser() -> argparse.ArgumentParser:
         "--runtime-root", help="Local software staging root (otherwise system temporary directory)"
     )
     run.add_argument("--processors", type=int, default=2)
+    run.add_argument("--selection-max-candidates-per-round", type=int, default=12)
+    run.add_argument("--selection-max-detail-rounds", type=int, default=3)
     run.add_argument(
         "--fluent-timeout", type=float, default=1800, help="Seconds per worker operation"
     )
@@ -168,6 +172,8 @@ def main(argv: list[str] | None = None) -> int:
                 ansys_root=args.ansys_root,
                 runtime_root=args.runtime_root,
                 processor_count=args.processors,
+                selection_max_candidates_per_round=args.selection_max_candidates_per_round,
+                selection_max_detail_rounds=args.selection_max_detail_rounds,
                 fluent_operation_timeout_s=args.fluent_timeout,
                 spaceclaim_timeout_s=args.spaceclaim_timeout,
             ),

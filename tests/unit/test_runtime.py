@@ -1,4 +1,4 @@
-"""Run options, output replacement and owned process communication."""
+"""Run configuration, output replacement and owned process communication."""
 
 import json
 import subprocess
@@ -9,6 +9,7 @@ import pytest
 
 from src import api, cli
 from src.adapters.fluent import FluentClient, FluentWorkerError
+from src.cli import _parser
 from src.config import RuntimeConfig
 from src.services.artifacts import create_run_directory
 
@@ -250,3 +251,14 @@ def test_cli_parameter_change_intervention_resumes_with_explicit_value(monkeypat
     output = capsys.readouterr().out
     for expected_text in ["set_layer_count", "wall", "Current value: 80", "Proposed value: 3", "Native layer count rejected"]:
         assert expected_text in output
+
+
+def test_cli_budget_options_and_config_validation():
+    args = _parser().parse_args(["run", "--geometry", "a.scdoc", "--prompt-file", "a.txt",
+                                "--selection-max-detail-rounds", "4",
+                                "--selection-max-candidates-per-round", "8"])
+    assert args.selection_max_detail_rounds == 4
+    assert args.selection_max_candidates_per_round == 8
+    for field in ("selection_max_detail_rounds", "selection_max_candidates_per_round"):
+        with pytest.raises(ValueError):
+            RuntimeConfig(**{field: 0})

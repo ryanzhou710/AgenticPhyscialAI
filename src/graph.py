@@ -9,7 +9,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 
 from src.nodes import cad, confirmation, fluent, results, review
-from src.services.terminal import progress_node
+from src.services.cli_output import progress_node
 from src.state import PipelineState
 
 

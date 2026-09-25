@@ -1,4 +1,4 @@
-"""Parameter contracts, units, native controls and repair approval; all offline."""
+"""Meshing parameters, unit conversion, native controls and repair execution."""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,12 +6,18 @@ from types import SimpleNamespace
 import pytest
 
 from src.services.boundaries import build_fluent_job, rebind_mesh_targets
-from src.services.contracts import CadSelectionPlan, ConfirmationPayload
-from src.services.geometry_models import GeometryCatalog
+from src.services.contracts import (
+    CadSelectionPlan,
+    ConfirmationPayload,
+    MeshRequirements,
+    NumericControl,
+)
+from src.services.geometry_catalog import GeometryCatalog
+from src.services.selection import extract_mesh_requirements
 from src.services.units import convert_length
-from src.workers.fluent_tasks import WatertightMeshingRunner
-from src.workers.mesh_job import MeshJob
-from src.workers.repair_protocol import RepairState
+from src.workers.fluent.job import MeshJob
+from src.workers.fluent.meshing import WatertightMeshingRunner
+from src.workers.fluent.repair import RepairState
 
 
 def test_selected_plan_requires_seed_and_opening():
@@ -299,7 +305,7 @@ def test_inferred_disable_is_not_an_explicit_user_request():
 
 
 def test_nested_controls_use_workflow_assignment_not_transient_command():
-    from src.workers.fluent_tasks import set_task_value
+    from src.workers.fluent.meshing import set_task_value
 
     class NativeProxy:
         def __init__(self):
@@ -334,19 +340,27 @@ def test_unresolved_and_empty_layer_scopes_reach_native_interface(tmp_path):
         assert tasks["boundary_layers"].face_scope.grow_on.get_state() == "selected-labels"
 
 
-def test_numeric_ranges_reach_native_interface_and_repair_controls(tmp_path):
+@pytest.mark.parametrize("value", [-2, 0, float("nan"), float("inf")])
+def test_invalid_normalized_lengths_are_rejected(value):
+    from src.services.contracts import MeshRequirements
+
+    with pytest.raises(ValueError):
+        MeshRequirements(global_size=length(value, "m"))
+
+
+def test_normalized_lengths_reach_native_interface_and_repair_controls(tmp_path):
     from src.services.contracts import MeshRequirements
 
     requirements = MeshRequirements.model_validate(
         {
-            "global_size": length(-2),
-            "local_refinements": [{"target": "feed", "boundary_name": "feed", "size": length(-1)}],
+            "global_size": length(0.002, "m"),
+            "local_refinements": [{"target": "feed", "boundary_name": "feed", "size": length(0.001, "m")}],
             "boundary_layers": {
                 "layers": 80,
                 "layers_source": "inferred",
                 "growth_rate": 0.2,
                 "growth_rate_source": "inferred",
-                "first_layer_height": length(-0.5),
+                "first_layer_height": length(0.0005, "m"),
             },
         }
     ).model_dump()
@@ -354,11 +368,11 @@ def test_numeric_ranges_reach_native_interface_and_repair_controls(tmp_path):
     runner.execute_step("import_geometry")
     runner.execute_step("surface_mesh")
     runner.execute_step("boundary_layers")
-    assert tasks["surface_mesh"].cfd_surface_mesh_controls.max_size.get_state() == -2
-    assert runner.repair_state.local_refinements[0]["size"] == -1
+    assert tasks["surface_mesh"].cfd_surface_mesh_controls.max_size.get_state() == 2
+    assert runner.repair_state.local_refinements[0]["size"] == 1
     assert tasks["boundary_layers"].number_of_layers.get_state() == 80
     assert tasks["boundary_layers"].rate.get_state() == 0.2
-    assert tasks["boundary_layers"].first_height.get_state() == -0.5
+    assert tasks["boundary_layers"].first_height.get_state() == 0.5
     controls = runner.repair_state
     for action, parameters in (
         ("set_global_size", {"value": -3}),
@@ -390,8 +404,8 @@ def test_native_rejection_requires_approval_for_user_parameters_and_mappings(
     from src.nodes import fluent, results
     from src.services import reviewer
     from src.services.contracts import RepairDecision
-    from src.workers.fluent_tasks import StepExecutionError
-    from src.workers.fluent_worker import FluentWorker
+    from src.workers.fluent.meshing import StepExecutionError
+    from src.workers.fluent.session import FluentWorker
 
     source = "inferred" if scenario == "inferred" else "user"
     layers = {"layers": 80, "layers_source": source, "target": "wall_a"}
@@ -518,7 +532,7 @@ def test_native_rejection_requires_approval_for_user_parameters_and_mappings(
 
 
 def test_native_setter_failure_retains_attempted_controls(tmp_path):
-    from src.workers.fluent_tasks import StepExecutionError
+    from src.workers.fluent.meshing import StepExecutionError
 
     runner, tasks = runner_at(tmp_path, job_at(tmp_path, global_size=length(-1)))
 
@@ -622,7 +636,7 @@ def test_local_reference_repair_and_each_user_size_change_require_approval(
 
 
 def test_first_failed_local_sizing_child_is_not_hidden_by_a_later_child(tmp_path):
-    from src.workers.fluent_tasks import StepExecutionError
+    from src.workers.fluent.meshing import StepExecutionError
 
     job = job_at(
         tmp_path,
@@ -660,7 +674,7 @@ def test_first_failed_local_sizing_child_is_not_hidden_by_a_later_child(tmp_path
 
 
 def test_final_boundary_check_requires_actual_names_and_types(tmp_path):
-    from src.workers.fluent_tasks import boundary_check
+    from src.workers.fluent.meshing import boundary_check
 
     job = job_at(tmp_path)
     current = {"inlet": ["feed"], "outlet": ["exit"], "wall": ["wall_a"], "symmetry": []}
@@ -675,3 +689,36 @@ def test_final_boundary_check_requires_actual_names_and_types(tmp_path):
     assert result["type_mismatches"] == [
         {"name": "feed", "expected": "velocity-inlet", "actual": "wall"}
     ]
+
+
+def test_model_converted_length_reaches_job_without_changing_import_unit(monkeypatch, tmp_path):
+    requests = []
+    requirements = MeshRequirements(global_size=NumericControl(
+        value=0.00002, unit="m", source="user",
+        original_expression="20 micrometres", basis="20 micrometres = 0.00002 m",
+    ))
+
+    def invoke(**kwargs):
+        requests.append(kwargs)
+        return requirements
+
+    monkeypatch.setattr(
+        "src.services.selection.GroundingLLMClient.from_runtime_config",
+        lambda **kwargs: SimpleNamespace(invoke=invoke),
+    )
+    parsed = extract_mesh_requirements(
+        catalog=GeometryCatalog(catalog_id="c", geometry_id="g"),
+        user_prompt="Use 20 micrometres", selection_plan=SimpleNamespace(openings=[]),
+        audit_dir=tmp_path,
+    )
+    geometry = tmp_path / "confirmed.scdoc"
+    geometry.write_bytes(b"fixture")
+    job = build_fluent_job(
+        geometry=str(geometry), roles={"feed": "inlet", "exit": "outlet", "wall": "wall"},
+        requirements=parsed.model_dump(),
+    )
+    assert job["global_size"] == pytest.approx(0.00002)
+    assert job["length_unit"] is None
+    assert parsed.global_size.original_expression == "20 micrometres"
+    assert "convert" in requests[0]["system_prompt"]
+    assert "missing_information" in requests[0]["system_prompt"]

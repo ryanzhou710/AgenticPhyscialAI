@@ -16,8 +16,8 @@ from src.nodes.confirmation import human_confirmation
 from src.nodes.review import review_failure
 from src.services.contracts import RepairDecision
 from src.state import PipelineState
-from src.workers.mesh_job import MeshJob
-from src.workers.repair_protocol import RepairState
+from src.workers.fluent.job import MeshJob
+from src.workers.fluent.repair import RepairState
 
 
 def test_graph_contains_spaceclaim_and_fluent_steps(tmp_path: Path):

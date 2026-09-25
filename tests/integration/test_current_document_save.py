@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from src.adapters.spaceclaim import SpaceClaimRunner
 from src.adapters.spaceclaim_build import SpaceClaimBuildAdapter
+from src.adapters.spaceclaim_query import SpaceClaimRunner
 from src.adapters.windows_process import request_window_close
 from src.services.artifacts import write_json
 from src.services.boundaries import named_groups

@@ -16,7 +16,7 @@ from src.services.contracts import (
     MeshRequirements,
 )
 from src.services.errors import PipelineError
-from src.services.geometry_models import GeometryCatalog
+from src.services.geometry_catalog import GeometryCatalog
 
 
 def _model_images(catalog: GeometryCatalog) -> list[Path]:
@@ -40,7 +40,7 @@ def _native_open_edges(catalog: GeometryCatalog) -> list[dict[str, Any]]:
         row
         for row in public.get("edges", [])
         if len(row.get("face_ids", [])) == 1
-        and (row.get("curve_type") == "Circle" or row.get("closed") is True)
+        and row.get("closed") is True
     ]
 
 
@@ -73,11 +73,9 @@ _DEFAULT_DETAIL_VIEWS = {
     "opening": ("Selected",),
     "seed": ("OwnerContext", "SelectedProxy"),
 }
-_MAX_DETAIL_CANDIDATES = 12
-_MAX_DETAIL_ROUNDS = 3
 
 
-def _candidate_details(requests: Iterable[CandidateDetailRequest]) -> list[dict[str, Any]]:
+def _candidate_details(requests: Iterable[CandidateDetailRequest], limit: int = 12) -> list[dict[str, Any]]:
     """Apply stable default views and combine requests for the same candidate."""
 
     combined: dict[str, dict[str, Any]] = {}
@@ -102,10 +100,10 @@ def _candidate_details(requests: Iterable[CandidateDetailRequest]) -> list[dict[
         for view in request.views or _DEFAULT_DETAIL_VIEWS[request.purpose]:
             if view not in item["detail_views"]:
                 item["detail_views"].append(view)
-    if len(combined) > _MAX_DETAIL_CANDIDATES:
+    if len(combined) > limit:
         raise PipelineError(
             "CAD_DETAIL_REQUEST_LIMIT",
-            f"This detail request contains {len(combined)} candidates, exceeding the {_MAX_DETAIL_CANDIDATES}-candidate limit.",
+            f"This detail request contains {len(combined)} candidates, exceeding the {limit}-candidate limit.",
             stage="understand_prompt",
             suggested_action="Narrow the candidate set before requesting more detail images.",
         )
@@ -286,8 +284,8 @@ def plan_cad_selection(
             "Each candidate must be a real catalog ID. Use purpose `opening` for face, loop or closed edge\n"
             "opening candidates; use purpose `seed` only for a face that may be the inner-wall seed.\n"
             "\n"
-            "Choose the smallest useful set. The application will render at most twelve distinct objects in\n"
-            "one round. An opening normally receives Selected evidence. A seed normally receives OwnerContext\n"
+            "Choose the smallest useful set. The application will render only the configured number of distinct objects in\n"
+            f"one round ({settings.selection_max_candidates_per_round} objects maximum). An opening normally receives Selected evidence. A seed normally receives OwnerContext\n"
             "and SelectedProxy evidence. Request another supported detail view only when it resolves a concrete\n"
             "ambiguity. Never use filenames, existing group names or prior-case knowledge.\n"
             "\n"
@@ -310,9 +308,10 @@ def plan_cad_selection(
         )
 
     cached: dict[tuple[str, str], dict[str, Any]] = {}
+    history = [{"screening": screening.model_dump(mode="json")}]
     requests = screening.candidates
-    for round_index in range(1, _MAX_DETAIL_ROUNDS + 1):
-        details = _candidate_details(requests)
+    for round_index in range(1, settings.selection_max_detail_rounds + 1):
+        details = _candidate_details(requests, settings.selection_max_candidates_per_round)
         _validate_detail_requests(catalog, details)
         missing = [
             {
@@ -371,8 +370,15 @@ def plan_cad_selection(
             + user_prompt
             + "\n\nCANDIDATE CATALOG (metres, global SpaceClaim XYZ):\n"
             + json.dumps(context, ensure_ascii=False)
+            + "\n\nPREVIOUS DECISIONS:\n"
+            + json.dumps(history, ensure_ascii=False)
+            + "\n\nAVAILABLE EVIDENCE:\n"
+            + json.dumps([{"candidate_id": key[0], "view": key[1]} for key in cached])
+            + f"\nMAXIMUM OBJECTS PER ROUND: {settings.selection_max_candidates_per_round}"
+            + "\n\nCURRENT REQUESTS:\n"
+            + json.dumps(details, ensure_ascii=False)
             + "\n\nDETAIL ROUND: "
-            + str(round_index)
+            + str(round_index) + " of " + str(settings.selection_max_detail_rounds)
             + "\nIMAGE ORDER: Front, Top, Right, Isometric, then these candidate details:\n"
             + json.dumps(
                 [
@@ -412,11 +418,12 @@ def plan_cad_selection(
                 fluid_domain_action=screening.fluid_domain_action,
                 fluid_domain_evidence=screening.fluid_domain_evidence,
             )
+        history.append({"round": round_index, "review": review.model_dump(mode="json")})
         requests = review.detail_requests
     return _clarification_plan(
         status="ambiguous",
         reference_view=screening.reference_view,
-        explanation="Three candidate-detail rounds did not uniquely identify the opening or inner-wall seed.",
+        explanation=f"{settings.selection_max_detail_rounds} candidate-detail rounds did not uniquely identify the opening or inner-wall seed.",
         missing_information=[
             "Clarify the opening location, shape, or inner-wall feature for these unresolved objects: "
             + ", ".join(
@@ -473,9 +480,12 @@ def extract_mesh_requirements(
             "unspecified values null, including the layer count. For a requested subset of walls,\n"
             "populate boundary_names with the supplied names, or retain the target description if it\n"
             "cannot be bound. Never replace a specific target by \"all walls\". Boundary-layer growth\n"
-            "rate affects boundary layers only. Preserve the original unit of every numeric length.\n"
+            "rate affects boundary layers only. Accept any unambiguous length unit in user text, convert\n"
+            "each numeric length to metres (unit=m), preserve original_expression and explain the conversion in basis.\n"
             "The first release supports internal flow, Watertight Geometry and poly-hexcore only. Do\n"
-            "not infer boundary roles here: those belong to CAD object grounding.\n"
+            "not infer boundary roles here: those belong to CAD object grounding. Report unsupported requests\n"
+            "in unsupported_requirements instead of silently substituting defaults. Report missing or\n"
+            "ambiguous units in missing_information and leave the affected control null; never guess units.\n"
             "\n"
             "length_unit is an explicit Fluent import-unit request, not the unit used by the\n"
             "geometry catalog. If the user does not request an import unit, return null. Do not\n"

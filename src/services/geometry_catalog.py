@@ -18,7 +18,7 @@ class CatalogObject(BaseModel):
 
     id: str
     kind: Literal["body", "face", "edge", "loop"]
-    moniker: str | None = None
+    moniker: str | None = Field(default=None, json_schema_extra={"model_visible": False})
     body_id: str | None = None
     face_id: str | None = None
     surface_type: str | None = None
@@ -45,36 +45,10 @@ class CatalogObject(BaseModel):
     closed: bool | None = None
 
     def model_facing_dict(self) -> dict[str, Any]:
-        fields = (
-            "id",
-            "kind",
-            "body_id",
-            "face_id",
-            "surface_type",
-            "curve_type",
-            "solid_or_sheet",
-            "volume_m3",
-            "area_m2",
-            "perimeter_m",
-            "length_m",
-            "radius_m",
-            "bbox",
-            "centroid_m",
-            "normal",
-            "axis",
-            "axis_origin_m",
-            "start_m",
-            "end_m",
-            "half_angle_rad",
-            "face_ids",
-            "edge_ids",
-            "loop_ids",
-            "adjacent_face_ids",
-            "is_outer",
-            "closed",
-        )
         result: dict[str, Any] = {}
-        for name in fields:
+        for name, definition in type(self).model_fields.items():
+            if (definition.json_schema_extra or {}).get("model_visible") is False:
+                continue
             value = getattr(self, name)
             if value is None or value == []:
                 continue
@@ -85,7 +59,6 @@ class CatalogObject(BaseModel):
 class GeometryCatalog(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    schema_version: int = 1
     catalog_id: str
     geometry_id: str
     coordinate_unit: Literal["m"] = "m"

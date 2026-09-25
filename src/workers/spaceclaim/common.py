@@ -63,7 +63,6 @@ except Exception:
     raise
 
 
-SCHEMA_VERSION = 1
 DIRECTION_REFERENCE_VIEW = "Front"
 AUXILIARY_VIEWS = ["Top", "Right", "Isometric"]
 DEFAULT_VIEWS = [DIRECTION_REFERENCE_VIEW] + AUXILIARY_VIEWS
@@ -170,7 +169,7 @@ def sorted_objects(objects):
 
 def scalar_key(value):
     measured = number(value)
-    return "" if measured is None else "%.12g" % measured
+    return (measured is not None, measured if measured is not None else 0.0)
 
 
 def vector_key(value):
@@ -212,7 +211,7 @@ def edge_sort_key(edge, body_ids):
 def assign_ids(prefix, objects, sort_key):
     by_id = {}
     id_by_moniker = {}
-    for index, obj in enumerate(sorted(list(objects), key=sort_key)):
+    for index, obj in enumerate(sorted(list(objects), key=lambda obj: (sort_key(obj), moniker_of(obj)))):
         candidate_id = "%s%04d" % (prefix, index + 1)
         by_id[candidate_id] = obj
         id_by_moniker[moniker_of(obj)] = candidate_id
@@ -316,7 +315,7 @@ def build_catalog():
             "start_m": vector3(edge.Shape.StartPoint),
             "end_m": vector3(edge.Shape.EndPoint),
             "face_ids": candidate_ids(edge.Faces, face_ids),
-            "closed": bool(getattr(edge.Shape, "IsClosed", False)) or isinstance(geometry, Circle),
+            "closed": bool(getattr(edge.Shape, "IsClosed", False)),
         }
         if isinstance(geometry, Circle):
             row.update(primitive_data(geometry))
@@ -388,7 +387,6 @@ def build_catalog():
             "moniker": moniker_of(group), "member_ids": members})
 
     return {
-        "schema_version": SCHEMA_VERSION,
         "public": {
             "coordinate_unit": "m",
             "bodies": public_bodies,
@@ -419,21 +417,11 @@ def load_catalog(request):
     return value.get("catalog", value)
 
 
-def stable_value(value):
-    if isinstance(value, float):
-        return scalar_key(value)
-    if isinstance(value, dict):
-        return dict((key, stable_value(value[key])) for key in sorted(value.keys()))
-    if isinstance(value, list):
-        return [stable_value(item) for item in value]
-    return value
-
-
 def geometry_signature(catalog):
     public = catalog.get("public", {})
     payload = dict((collection, public.get(collection, []))
                    for collection in ("bodies", "faces", "edges", "loops"))
-    return json.dumps(stable_value(payload), sort_keys=True, separators=(",", ":"))
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
 def validate_catalog_identity(supplied_catalog, current_catalog, requested_ids):
@@ -494,8 +482,6 @@ def verify_active_selection(resolved, catalog):
 
 
 def select_candidates(request, catalog):
-    if catalog.get("schema_version") != SCHEMA_VERSION:
-        raise ValueError("Unsupported catalog schema version")
     # The host rebuilds deterministic IDs from geometry/topology before using
     # current objects.  The caller additionally checks the saved/current
     # native Moniker for every expanded requested object, preventing an

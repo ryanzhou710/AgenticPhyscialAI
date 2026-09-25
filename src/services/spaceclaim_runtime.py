@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from src.adapters.spaceclaim import SpaceClaimRunner
+from src.adapters.spaceclaim_query import SpaceClaimRunner
 from src.config import config_from_state
 from src.state import PipelineState
 

@@ -24,7 +24,7 @@ class FluentClient:
         self.runtime_dir = Path(runtime_dir).resolve()
         self.config = config or RuntimeConfig()
         self.process = subprocess.Popen(
-            [sys.executable, "-m", "src.workers.fluent_worker", str(self.runtime_dir)],
+            [sys.executable, "-m", "src.workers.fluent.session", str(self.runtime_dir)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

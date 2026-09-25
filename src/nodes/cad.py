@@ -16,8 +16,8 @@ from src.services.execution import (
     _run_dir,
     _succeeded,
 )
-from src.services.geometry_models import GeometryCatalog
-from src.services.grounding import extract_mesh_requirements, plan_cad_selection
+from src.services.geometry_catalog import GeometryCatalog
+from src.services.selection import extract_mesh_requirements, plan_cad_selection
 from src.services.spaceclaim_runtime import open_spaceclaim_reader
 from src.state import PipelineState
 
@@ -111,6 +111,18 @@ def understand_prompt(state: PipelineState) -> dict[str, Any]:
             audit_dir=_run_dir(state) / "llm",
             config=config_from_state(state),
         )
+        if requirements.missing_information or requirements.unsupported_requirements:
+            raise HumanInterventionRequired({
+                "kind": "clarification",
+                "failed_step": "understand_prompt",
+                "message": "Meshing requirements need clarification or exceed supported capabilities.",
+                "evidence": {
+                    "missing_information": requirements.missing_information,
+                    "unsupported_requirements": requirements.unsupported_requirements,
+                },
+                "attempted_repairs": [],
+                "required_action": "Clarify units or revise the unsupported meshing requirements.",
+            })
         return _succeeded(
             state,
             "understand_prompt",

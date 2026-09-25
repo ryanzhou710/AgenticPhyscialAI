@@ -13,9 +13,9 @@ from src.adapters.llm import GroundingLLMClient
 from src.config import config_from_state
 from src.services.contracts import RepairDecision, repair_action_spec, repair_tool_catalog
 from src.services.execution import _copy_runtime_evidence, _persist, _run_dir
-from src.services.geometry_models import GeometryCatalog
+from src.services.geometry_catalog import GeometryCatalog
 from src.state import PipelineState
-from src.workers.repair_protocol import STEP_ORDER
+from src.workers.fluent.repair import STEP_ORDER
 
 FLUENT_STEPS = STEP_ORDER[:-1]
 VISUAL_REVIEW_STEPS = frozenset({
@@ -187,11 +187,15 @@ def _user_parameter_change(state: PipelineState, decision: RepairDecision) -> di
             requested_unit = control.get("unit")
         else:
             source, requested = layers.get(key + "_source"), layers.get(key)
-    if source != "user":
+    disabling_layers = parameter == "layer_count" and decision.parameters["value"] == 0
+    if disabling_layers and source == "user" and requested == 0 and current in (None, 0):
+        return None
+    if source != "user" and not disabling_layers:
         return None
     return {
         "target": target,
         "requested_value": requested,
+        "original_expression": (control.get("original_expression", "") if requested_unit else ""),
         "requested_unit": requested_unit or "dimensionless",
         "current_value": current,
         "proposed_value": decision.parameters["value"],
@@ -447,7 +451,8 @@ def diagnose_failure(state: PipelineState) -> dict[str, Any]:
                 "use the actual software error to propose a correction. Numeric controls, including\n"
                 "inferred or default values, can be repaired automatically when the current software\n"
                 "evidence supports the change. Every proposed change to a user-specified numeric control\n"
-                "requires human approval. Original requests remain in the evidence; current attempted\n"
+                "requires human approval. Disabling boundary layers also requires approval even for inferred\n"
+                "or default layer counts. Original requests remain in the evidence; current attempted\n"
                 "values are in the observed controls.\n"
                 "For local sizing, source_boundary_name identifies the original request after an\n"
                 "execution label is replaced. A label repair does not grant approval to change the size.\n"
@@ -596,7 +601,7 @@ def execute_repair(state: PipelineState) -> RepairOutcome:
                 "human_request": _human_request(
                     state,
                     kind="parameter_change",
-                    message="The proposed repair would change a user-specified parameter and requires approval.",
+                    message="The proposed repair changes a user-specified parameter or disables boundary layers and requires approval.",
                     required_action="Approve the proposed value, optionally provide a replacement value, or cancel.",
                     evidence={
                         "repair_action": decision.action,

@@ -17,7 +17,7 @@ CAD + request
 
 The initial SpaceClaim query exports the complete body, face, edge, and loop catalog plus four global reference views. It does **not** render every candidate object. The model first narrows the request to possible openings and an inner-wall seed. SpaceClaim then renders only those requested objects in one batch: openings default to `Selected`; seed faces default to `OwnerContext` and `SelectedProxy`.
 
-At most 12 distinct objects are rendered per detail round and the selection dialogue has at most three detail rounds. Images are reused by object ID and view while the geometry catalog remains valid. If the evidence is still ambiguous, the run pauses for clarification instead of guessing an opening or seed face.
+By default, at most 12 distinct objects are rendered per detail round and selection has at most three detail rounds. Configure positive limits with `--selection-max-candidates-per-round` and `--selection-max-detail-rounds`, or the corresponding `RuntimeConfig` fields. Each review receives previous decision summaries and the available object/view evidence list, plus only the current requested detail images. Images are reused by object ID and view while the geometry catalog remains valid. If the evidence is still ambiguous, the run pauses for clarification instead of guessing an opening or seed face.
 
 Before extraction, the application resolves every selected face, loop, or edge into one explicit opening record and checks closure, planarity, missing edges, overlapping contours, seed identity, and multi-inner-loop ambiguity. It tries face capping when every opening is exactly represented by one planar end face; otherwise it uses the equivalent edge contours. A failed face attempt may retry once with the same contours as edges in a fresh SpaceClaim process. It never changes the selected objects during that retry.
 
@@ -47,7 +47,7 @@ Replace the Ansys path with your actual installation directory. You can also pas
 The installed command is `cfd-agent`. The Python package is `src`, and the equivalent module entry point is:
 
 ```powershell
-.\.venv\Scripts\python.exe -m src run --help
+.\.venv\Scripts\python.exe -m src.cli run --help
 ```
 
 ## Prepare the inputs
@@ -186,7 +186,7 @@ The Python API returns `status="paused"` and writes `pause.json` when human inpu
 
 ## Automatic repairs and additional human input
 
-Numeric corrections to inferred or default values can run automatically following diagnosis of software feedback. Every proposed change to a user-specified mesh size or boundary-layer control requires approval; no separate lock flag is needed. The confirmation shows the target, original request, current value, proposed value, units and diagnosis. Accept the proposal, enter a replacement number in the displayed runtime unit, or cancel. Approval applies to this repair only; a later proposal requires confirmation again. Repairs do not authorize relaxing mesh-quality acceptance criteria.
+Numeric corrections to inferred or default values can run automatically following diagnosis of software feedback. Disabling boundary layers requires approval even when the previous layer count was inferred or left at its native default; an explicitly requested zero-layer setting does not require repeated approval merely to retry. Every proposed change to a user-specified mesh size or boundary-layer control requires approval; no separate lock flag is needed. The confirmation shows the target, original request, current value, proposed value, units and diagnosis. Accept the proposal, enter a replacement number in the displayed runtime unit, or cancel. Approval applies to this repair only; a later proposal requires confirmation again. Repairs do not authorize relaxing mesh-quality acceptance criteria.
 
 Additional intervention can occur in these situations:
 
@@ -242,6 +242,43 @@ Build a wheel for installation in a separate environment:
 .\.venv\Scripts\python.exe -m pip wheel . --no-deps --wheel-dir dist
 ```
 
-The source lives directly in `src/`, including `adapters/`, `nodes/`, `services/`, `workers/`, and `prompts/`. Tests live in `tests/`. The old `cfd_agent` import path has no compatibility layer.
+The source lives directly in `src/`. Tests live in `tests/`. The old `cfd_agent` import path has no compatibility layer.
+
+| Location | Responsibility |
+|---|---|
+| `adapters/` | Host-side communication with software and the model. |
+| `adapters/spaceclaim_query.py` | Read CAD geometry, verify selections, and request screenshots. |
+| `adapters/spaceclaim_build.py` | Extract or reuse the fluid domain, create boundary groups, and request CAD saves. |
+| `nodes/` | Workflow steps and state updates. |
+| `services/selection.py` | LLM screening, detail review, and mesh requirement parsing. |
+| `services/openings.py` | Resolve CAD faces, loops, and edges into extraction openings. |
+| `services/geometry_catalog.py` | Geometry catalog data models and model-visible object attributes. |
+| `services/cli_output.py` | Command-line progress, errors, and outcome summaries. |
+| `workers/spaceclaim/` | Native `query.py`, `build.py`, `save.py`, and shared `common.py` helpers. These scripts still target API V241 and run in SpaceClaim's IronPython environment. |
+| `workers/fluent/` | `session.py` owns the worker process; `meshing.py` executes tasks; `job.py` parses inputs; `repair.py` applies repairs. |
+
+Prompts are defined in the services that use them. Fluent starts through `python -m src.workers.fluent.session`; SpaceClaim scripts are staged and launched by their adapters.
 
 Native SpaceClaim and Fluent integration tests require an available installation, license, and suitable CAD input. A complete LLM-driven run also needs model credentials. Passing unit tests with software doubles does not establish that a real Ansys run succeeds.
+
+### Length interpretation and catalog checks
+
+Input remains an existing `.scdoc` file plus a non-empty UTF-8 prompt file. Users may describe lengths in any unambiguous unit. The LLM converts mesh-control lengths to metres, retains `original_expression`, records the conversion in `basis`, and preserves `user`/`inferred` provenance. The program checks positive finite length values but does not independently verify conversion arithmetic. Missing or ambiguous units and unsupported meshing requests pause for clarification. Geometry import units remain separate and retain their existing supported values; mesh-control normalization must not change CAD scale.
+
+Catalogs no longer emit or check a schema version. Geometry signatures compare full serialized numeric values without 12-significant-digit rounding; even small numeric differences can now reject a stale catalog. Topology, native Moniker identity and active-selection checks remain. Numeric sorting uses unrounded values with Moniker tie-breaking; old catalogs/checkpoints are not migrated. Model-visible properties follow declared catalog fields, excluding fields marked internal; undeclared extras are not sent to the model. Native closed-edge data, rather than the Circle type alone, determines closed-edge screenshot candidates.
+
+Python configuration example (the existing prompt-file API is unchanged):
+
+```python
+from src import run_pipeline
+from src.config import RuntimeConfig
+
+outcome = run_pipeline(
+    geometry="model.scdoc",
+    prompt_path="requirements.txt",
+    runtime_config=RuntimeConfig(
+        selection_max_candidates_per_round=8,
+        selection_max_detail_rounds=4,
+    ),
+)
+```

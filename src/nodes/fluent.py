@@ -11,7 +11,7 @@ from src.services.artifacts import write_json
 from src.services.errors import PipelineError, make_error_detail
 from src.services.execution import _failed, _run_dir, _succeeded
 from src.state import PipelineState
-from src.workers.repair_protocol import STEP_ORDER
+from src.workers.fluent.repair import STEP_ORDER
 
 FLUENT_STEPS = STEP_ORDER[:-1]
 

@@ -21,6 +21,8 @@ class RuntimeConfig(BaseModel):
     model: str = Field(default=PRODUCTION_MODEL, min_length=1, pattern=r"\S")
     auth_mode: Literal["codex_oauth", "api_key"] = "codex_oauth"
     processor_count: int = Field(default=2, ge=1)
+    selection_max_candidates_per_round: int = Field(default=12, ge=1)
+    selection_max_detail_rounds: int = Field(default=3, ge=1)
     spaceclaim_timeout_s: float = Field(default=900, gt=0)
     fluent_start_timeout_s: float = Field(default=180, gt=0)
     fluent_operation_timeout_s: float = Field(default=1800, gt=0)

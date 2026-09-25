@@ -1,4 +1,4 @@
-"""Offline protocol events, not claims of a real model call."""
+"""Model transport, authentication and shared model configuration."""
 
 import json
 from types import SimpleNamespace
@@ -157,9 +157,9 @@ def test_api_key_mode_requires_environment_variable(monkeypatch):
 def test_selection_requirements_and_reviewer_share_configured_model(tmp_path, monkeypatch):
     from src.adapters.llm import GroundingLLMClient
     from src.config import RuntimeConfig
-    from src.services import grounding, reviewer
+    from src.services import reviewer, selection
     from src.services.contracts import CadSelectionPlan, MeshRequirements, RepairDecision
-    from src.services.geometry_models import GeometryCatalog
+    from src.services.geometry_catalog import GeometryCatalog
 
     selected = CadSelectionPlan(
         status="selected",
@@ -201,10 +201,10 @@ def test_selection_requirements_and_reviewer_share_configured_model(tmp_path, mo
         faces=[{"id": "F1", "kind": "face"}, {"id": "F2", "kind": "face"}],
     )
     settings = RuntimeConfig(model="chosen-model")
-    plan = grounding.plan_cad_selection(
+    plan = selection.plan_cad_selection(
         catalog=catalog, user_prompt="mesh", audit_dir=tmp_path, config=settings
     )
-    grounding.extract_mesh_requirements(
+    selection.extract_mesh_requirements(
         catalog=catalog,
         user_prompt="mesh",
         selection_plan=plan,
@@ -221,22 +221,3 @@ def test_selection_requirements_and_reviewer_share_configured_model(tmp_path, mo
         }
     )
     assert models == ["chosen-model"] * 3
-
-
-def test_visual_edge_candidates_only_include_supported_circular_open_edges():
-    from src.services.geometry_models import GeometryCatalog
-    from src.services.grounding import _native_open_edges
-
-    native_edges = [
-        {"id": "E-circle-open", "curve_type": "Circle", "face_ids": ["F1"]},
-        {"id": "E-circle-seam", "curve_type": "Circle", "face_ids": ["F1", "F2"]},
-        {"id": "E-line-open", "curve_type": "Line", "face_ids": ["F1"]},
-        {"id": "E-line-seam", "curve_type": "Line", "face_ids": ["F1", "F2"]},
-    ]
-    catalog = GeometryCatalog(
-        catalog_id="catalog",
-        geometry_id="geometry",
-        native_catalog={"public": {"edges": native_edges}},
-    )
-
-    assert _native_open_edges(catalog) == [native_edges[0]]

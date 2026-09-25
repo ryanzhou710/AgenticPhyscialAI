@@ -1,6 +1,59 @@
-from pathlib import Path
+"""SpaceClaim catalog identity, model-visible fields and candidate rendering."""
 
-from src.adapters.spaceclaim import SpaceClaimRunner
+import ast
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from pydantic import Field
+
+from src.adapters.spaceclaim_query import SpaceClaimRunner
+from src.services.geometry_catalog import CatalogObject, GeometryCatalog
+
+
+def test_visible_declared_fields_exclude_internal_and_extras():
+    class ExtendedObject(CatalogObject):
+        curvature: float = 2.0
+        internal_note: str = Field(default="private", json_schema_extra={"model_visible": False})
+
+    data = ExtendedObject(id="F1", kind="face", moniker="native", arbitrary="extra").model_facing_dict()
+    assert data["curvature"] == 2.0
+    assert not {"internal_note", "moniker", "arbitrary"} & data.keys()
+    assert "schema_version" not in GeometryCatalog(catalog_id="c", geometry_id="g").model_dump()
+
+
+def native_functions(*names):
+    source = Path("src/workers/spaceclaim/common.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    definitions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+    namespace = {"json": json, "number": float, "moniker_of": lambda obj: obj.moniker}
+    exec(compile(ast.Module(body=definitions, type_ignores=[]), "native-test", "exec"), namespace)
+    return namespace
+
+
+def test_signature_keeps_full_precision_and_checks_native_identity():
+    ns = native_functions("geometry_signature", "validate_catalog_identity", "expand_candidate_ids")
+    def catalog(area, moniker="native"):
+        return {"public": {"faces": [{"id": "F1", "area": area}]},
+                "internal": {"refs": {"F1": {"moniker": moniker}}}}
+    a = catalog(0.012345678901234)
+    b = catalog(0.012345678901235)
+    with pytest.raises(ValueError, match="Geometry or topology changed"):
+        ns["validate_catalog_identity"](a, b, ["F1"])
+    with pytest.raises(ValueError, match="identity changed"):
+        ns["validate_catalog_identity"](a, catalog(0.012345678901234, "other"), ["F1"])
+    ns["validate_catalog_identity"](a, a, ["F1"])
+
+
+def test_native_numeric_sort_keeps_precision_and_moniker_breaks_ties():
+    ns = native_functions("scalar_key", "assign_ids")
+    key = ns["scalar_key"]
+    assert key(0.012345678901234) != key(0.012345678901235)
+    assert key(2) < key(10)
+    objects = [SimpleNamespace(moniker="b"), SimpleNamespace(moniker="a")]
+    by_id, _ = ns["assign_ids"]("F", objects, lambda obj: key(2))
+    assert [obj.moniker for obj in by_id.values()] == ["a", "b"]
 
 
 def test_catalog_preserves_candidate_render_failures_without_failing(tmp_path, monkeypatch):
@@ -58,7 +111,7 @@ def test_catalog_preserves_candidate_render_failures_without_failing(tmp_path, m
 
 
 def test_detail_renderer_passes_only_requested_views_and_labels_them(tmp_path, monkeypatch):
-    from src.services.geometry_models import GeometryCatalog
+    from src.services.geometry_catalog import GeometryCatalog
 
     runner = SpaceClaimRunner(output_dir=tmp_path / "output")
     image = tmp_path / "detail.png"

@@ -7,7 +7,7 @@ from typing import Any
 from src.services.contracts import repair_action_spec
 from src.services.units import convert_length
 
-from .mesh_job import MeshJob
+from .job import MeshJob
 
 STEP_ORDER = (
     "import_geometry",

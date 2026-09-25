@@ -6,7 +6,7 @@ import copy
 from typing import Any
 
 from src.services.errors import PipelineError
-from src.services.geometry_models import GeometryCatalog
+from src.services.geometry_catalog import GeometryCatalog
 from src.services.units import control_in_metres
 
 ALLOWED_ROLES = {"inlet", "outlet", "wall", "symmetry"}

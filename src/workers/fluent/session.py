@@ -11,9 +11,9 @@ from pathlib import Path
 
 from src.config import RuntimeConfig
 
-from .fluent_tasks import WatertightMeshingRunner
-from .mesh_job import MeshJob
-from .repair_protocol import RepairState
+from .job import MeshJob
+from .meshing import WatertightMeshingRunner
+from .repair import RepairState
 
 
 class FluentWorker:
@@ -130,7 +130,7 @@ class FluentWorker:
 
 def main() -> int:
     if len(sys.argv) != 2:
-        raise SystemExit("usage: python -m src.workers.fluent_worker RUNTIME_DIR")
+        raise SystemExit("usage: python -m src.workers.fluent.session RUNTIME_DIR")
     runtime = Path(sys.argv[1]).resolve()
     worker = FluentWorker(runtime)
     protocol = sys.stdout

@@ -1,42 +1,11 @@
-"""Opening topology candidates exposed to the CAD grounding model."""
+"""CAD extraction strategy, explicit fluid-body reuse and native retries."""
 
 import pytest
 
-from src.services.geometry_models import GeometryCatalog
-from src.services.grounding import _opening_candidate_context
-
-
-def test_opening_context_exposes_planar_faces_and_closed_arbitrary_loops():
-    catalog = GeometryCatalog(
-        catalog_id="catalog",
-        geometry_id="geometry",
-        faces=[
-            {"id": "F_RECT", "kind": "face", "surface_type": "Plane"},
-            {"id": "F_WALL", "kind": "face", "surface_type": "Cylinder"},
-        ],
-        loops=[
-            {
-                "id": "L_RECT",
-                "kind": "loop",
-                "face_id": "F_RECT",
-                "closed": True,
-                "is_outer": True,
-                "edge_ids": ["E1", "E2", "E3", "E4"],
-            },
-            {
-                "id": "L_OPEN",
-                "kind": "loop",
-                "face_id": "F_RECT",
-                "closed": False,
-            },
-        ],
-    )
-
-    context = _opening_candidate_context(catalog)
-
-    assert context["planar_faces"] == ["F_RECT"]
-    assert context["closed_loops"] == ["L_RECT"]
-    assert "arbitrary opening" in context["selection_guidance"]
+from src.adapters.spaceclaim_build import SpaceClaimBuildAdapter
+from src.adapters.spaceclaim_query import SpaceClaimError
+from src.services.errors import PipelineError
+from src.services.geometry_catalog import GeometryCatalog
 
 
 def test_cad_node_uses_volume_extract_for_a_silent_closed_body(tmp_path, monkeypatch):
@@ -187,3 +156,79 @@ def test_explicit_reuse_reaches_native_execution_without_catalog_topology_gate(
     else:
         assert not result["error"]
         assert result["extraction"]["transfer"]["source_mode"] == "existing_fluid_body"
+
+
+def catalog():
+    return {
+        "public": {
+            "faces": [
+                {"id": "F1", "surface_type": "Plane"},
+                {"id": "F2", "surface_type": "Cylinder"},
+            ],
+            "edges": [
+                {"id": "E1", "curve_type": "Circle", "closed": True, "face_ids": ["F1"]}
+            ],
+            "loops": [
+                {"id": "L1", "face_id": "F1", "is_outer": True, "closed": True,
+                 "edge_ids": ["E1"]}
+            ],
+        }
+    }
+
+
+def plan():
+    return {
+        "seed_inner_wall_id": "F2",
+        "openings": [{"candidate_id": "F1", "name": "inlet", "role": "inlet"}],
+    }
+
+
+def test_face_failure_retries_once_with_same_contour_in_fresh_execution(monkeypatch, tmp_path):
+    adapter = SpaceClaimBuildAdapter(runtime_dir=tmp_path, ui_mode="hidden")
+    calls = []
+
+    def execute(operation, payload, **kwargs):
+        calls.append(payload)
+        if payload["extraction_strategy"] == "faces":
+            raise SpaceClaimError("VolumeExtract failed")
+        return {"ok": True, "transfer": {}}
+
+    monkeypatch.setattr(adapter, "_execute", execute)
+    result = adapter.extract_volume(
+        source=tmp_path / "original.scdoc",
+        output=tmp_path / "extracted.scdoc",
+        catalog=catalog(),
+        selection_plan=plan(),
+    )
+
+    assert [call["extraction_strategy"] for call in calls] == ["faces", "edges"]
+    assert calls[0]["input"] == calls[1]["input"]
+    assert calls[0]["terminal_records"] == calls[1]["terminal_records"]
+    assert "selection_plan" not in calls[0]
+    assert result["extraction_attempts"] == [
+        {"strategy": "faces", "status": "failed", "error": "VolumeExtract failed", "detail": {}},
+        {"strategy": "edges", "status": "success"},
+    ]
+
+
+def test_identity_failure_does_not_switch_to_edge_strategy(monkeypatch, tmp_path):
+    adapter = SpaceClaimBuildAdapter(runtime_dir=tmp_path, ui_mode="hidden")
+    calls = []
+
+    def execute(operation, payload, **kwargs):
+        calls.append(payload)
+        raise SpaceClaimError(
+            "Object identity changed", detail={"code": "CAD_OBJECT_IDENTITY_CHANGED"}
+        )
+
+    monkeypatch.setattr(adapter, "_execute", execute)
+
+    with pytest.raises(PipelineError) as error:
+        adapter.extract_volume(
+            source=tmp_path / "original.scdoc",
+            output=tmp_path / "extracted.scdoc",
+            catalog=catalog(),
+            selection_plan=plan(),
+        )
+    assert error.value.detail["code"] == "CAD_VOLUME_EXTRACT_FAILED"
+    assert [call["extraction_strategy"] for call in calls] == ["faces"]
