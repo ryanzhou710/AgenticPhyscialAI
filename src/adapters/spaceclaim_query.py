@@ -685,8 +685,9 @@ class SpaceClaimRunner:
     ) -> list[dict[str, Any]]:
         """Render selected candidate evidence in one SpaceClaim invocation per round."""
 
-        if len({item.get("candidate_id") for item in requests}) != len(requests) or len(requests) > 12:
-            raise ValueError("candidate detail rendering requires at most 12 distinct candidates")
+        limit = self.config.selection_max_candidates_per_round
+        if len({item.get("candidate_id") for item in requests}) != len(requests) or len(requests) > limit:
+            raise ValueError(f"candidate detail rendering requires at most {limit} distinct candidates")
         selections = [
             {
                 "task_id": "detail-" + str(item["candidate_id"]),

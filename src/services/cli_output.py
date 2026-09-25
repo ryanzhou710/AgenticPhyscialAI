@@ -10,9 +10,11 @@ from src.state import PipelineState
 LABELS = {
     "prepare": "Prepare CAD working copy",
     "query_geometry": "Read SpaceClaim geometry and reference views",
-    "understand_prompt": "LLM screening and selection confirmation",
+    "understand_prompt": "LLM screening and extraction selection",
     "verify_selection": "Verify native SpaceClaim objects",
     "extract_volume": "Extract fluid domain",
+    "select_fluid_body": "Select target fluid body",
+    "plan_boundary_groups": "Plan extracted-fluid boundary groups",
     "label_faces": "Create fluid-domain boundary groups",
     "validate_cad": "Validate CAD",
     "reload_confirmed_cad": "Hand off confirmed CAD",

@@ -2,12 +2,13 @@
 
 CFD Agent turns a SpaceClaim CAD model and a natural-language request into a Fluent Watertight Geometry poly-hexcore volume mesh. LangGraph coordinates the workflow, an LLM interprets the request and selects geometry, SpaceClaim prepares the fluid domain, and PyFluent runs the meshing tasks.
 
-The current scope is one connected internal fluid domain with planar opening contours. Flow solving and multiple fluid domains are not supported.
+Each run hands one selected internal fluid body to Fluent. The input or a native extraction result may contain multiple bodies, but Fluent does not process multiple fluid domains concurrently. Flow solving is not supported, and SpaceClaim remains the authority for whether a selected extraction method can handle a particular opening geometry.
 
 ```text
 CAD + request
-→ understand the request and select geometry
-→ extract or reuse the fluid domain in SpaceClaim and create boundary groups
+→ LLM selects explicit extraction or reuse objects
+→ SpaceClaim extracts candidates or preserves the requested reusable body
+→ LLM selects one target body, then groups its actual boundary faces
 → review or edit the working CAD and confirm
 → generate and validate the volume mesh in Fluent
 → export the mesh and archive results and evidence
@@ -15,11 +16,13 @@ CAD + request
 
 ## Geometry selection and diagnostics
 
-The initial SpaceClaim query exports the complete body, face, edge, and loop catalog plus four global reference views. It does **not** render every candidate object. The model first narrows the request to possible openings and an inner-wall seed. SpaceClaim then renders only those requested objects in one batch: openings default to `Selected`; seed faces default to `OwnerContext` and `SelectedProxy`.
+The initial SpaceClaim query exports the complete body, face, edge, and loop catalog plus four global reference views. It does **not** render every candidate object. The model first narrows the request to possible extraction objects, a seed face, or a reusable body. SpaceClaim then renders only those requested objects in one batch: extraction objects default to `Selected`; seed faces default to `OwnerContext` and `SelectedProxy`.
 
-By default, at most 12 distinct objects are rendered per detail round and selection has at most three detail rounds. Configure positive limits with `--selection-max-candidates-per-round` and `--selection-max-detail-rounds`, or the corresponding `RuntimeConfig` fields. Each review receives previous decision summaries and the available object/view evidence list, plus only the current requested detail images. Images are reused by object ID and view while the geometry catalog remains valid. If the evidence is still ambiguous, the run pauses for clarification instead of guessing an opening or seed face.
+By default, at most 12 distinct objects are rendered per detail round and selection has at most three detail rounds. Configure positive limits with `--selection-max-candidates-per-round` and `--selection-max-detail-rounds`, or the corresponding `RuntimeConfig` fields. Each review receives previous decision summaries and the available object/view evidence list, plus only the current requested detail images. Images are reused by object ID and view while the geometry catalog remains valid. If the evidence is still ambiguous, the run pauses for clarification instead of guessing an object or face group.
 
-Before extraction, the application resolves every selected face, loop, or edge into one explicit opening record and checks closure, planarity, missing edges, overlapping contours, seed identity, and multi-inner-loop ambiguity. It tries face capping when every opening is exactly represented by one planar end face; otherwise it uses the equivalent edge contours. A failed face attempt may retry once with the same contours as edges in a fresh SpaceClaim process. It never changes the selected objects during that retry.
+For `extract`, the model must give one seed face and one explicit method: `faces` references real face IDs, while `edges` references real loop IDs or explicit edge IDs. A face is never silently converted to an inner or outer loop. The host checks IDs, object types, catalog identity, and SpaceClaim's active selection; it does not reject a choice because of planarity, edge-adjacency count, contour closure, or a host-side topology heuristic. SpaceClaim performs the native operation and records the actual error if it cannot extract a usable volume.
+
+For `reuse`, the model selects one existing body ID and supplies no seed or opening contour. After extraction or reuse, the run records every positive-volume native candidate. One candidate is selected explicitly (or used directly when it is the sole valid candidate), isolated into a separate working copy, and re-queried. A second LLM review creates every boundary group from the actual target-body faces. Groups may contain multiple faces; all faces must be covered exactly once, and the host does not create a default `wall` group for omitted faces.
 
 Each failed workflow stage writes `artifacts/<stage>-error.json`. The terminal prints an English summary with the error code, stage, involved object, reason, suggested next action, and artifact path. Native software feedback remains in the evidence record.
 
@@ -59,7 +62,7 @@ C:\CFD-inputs\duct.scdoc
 C:\CFD-inputs\prompt.txt
 ```
 
-Write `prompt.txt` in UTF-8. Describe the intended openings, their boundary roles, and the seed face using features visible in your CAD. If you use directions such as left or right, specify the reference view.
+Write `prompt.txt` in UTF-8. For extraction, describe the intended openings, their boundary roles, and a seed face using features visible in your CAD. For reuse, explicitly say that the file already contains the fluid body and describe which body is the target. If you use directions such as left or right, specify the reference view.
 
 Use this template as a starting point, replacing the bracketed text:
 
@@ -68,7 +71,7 @@ Use [reference view] as the directional reference.
 Extract the internal fluid volume.
 Select [opening locations or features] and [the seed face on the inner fluid wall].
 Assign [opening name] as an inlet and [opening name] as an outlet.
-Treat the remaining fluid boundary as a wall.
+Describe every intended wall or symmetry boundary group.
 Optional: [global size, local refinement, boundary-layer settings, and length units].
 ```
 
@@ -77,13 +80,13 @@ For example, **only if these features describe your model**:
 ```text
 Use Front as the directional reference. Extract the internal fluid volume.
 The left circular opening is inlet_in; the right rectangular opening is outlet_out.
-Use the long inner duct face as the extraction seed. Treat remaining faces as walls.
+Use the long inner duct face as the extraction seed. Name the remaining fluid faces as wall boundaries.
 Use a 4 mm global size and three boundary layers on the wall.
 ```
 
 The example names and geometry are not required inputs or special cases in the pipeline. Selection uses the current geometry catalog, images, request, and software feedback.
 
-By default, the agent extracts a fluid domain. If the CAD already represents the fluid volume, explicitly say so in the request. SpaceClaim performs the native reuse validation during that operation. Unclear or conflicting intent can require clarification.
+By default, the agent extracts a fluid domain. If the CAD already represents the fluid volume, explicitly say so and identify the intended body by its visible features. The model must make an explicit extract/reuse decision. If extraction creates multiple positive-volume candidates, it asks the model to identify the target instead of selecting by order, size, or filename. Unclear or conflicting intent can require clarification.
 
 ## Run with Codex OAuth
 
@@ -148,7 +151,7 @@ Every normal run pauses between SpaceClaim and Fluent:
 3. Enter `yes` to continue, or `no` to cancel.
 4. Before meshing, the agent rereads the saved CAD and checks its groups against the confirmed roles.
 
-The handoff also requires exactly one positive-volume solid, no free edges, nonempty nonoverlapping face groups, complete face coverage, and both inlet and outlet roles. A failed check stops before Fluent starts.
+The handoff requires exactly one positive-volume solid in the isolated target copy, nonempty nonoverlapping face groups, complete face coverage, and both inlet and outlet roles. A failed check stops before Fluent starts. It does not reject the CAD solely because a catalogued edge has an unexpected adjacent-face count; SpaceClaim and Fluent report any native topology failure at their actual operation stage.
 
 In GUI mode, `yes` saves the current working document before rereading it. In hidden mode, the agent uses the file already saved on disk, so save any external edits yourself. Cancelling does not approve or save pending CAD edits.
 
@@ -192,7 +195,7 @@ Additional intervention can occur in these situations:
 
 | Situation | What you provide |
 |---|---|
-| Unclear opening, seed face, or fluid-domain intent | A clarification identifying the intended geometry or operation. |
+| Unclear extraction object, target body, or boundary-face group | A clarification identifying the intended geometry or operation. |
 | Geometry or boundary purpose needs revision | An edited working CAD followed by confirmation. |
 | A boundary reference or boundary-layer target must be replaced | The exact Fluent boundary label or labels. |
 | A user-specified numeric control needs a change | Approval of the proposal, a replacement value, or cancellation. |
@@ -217,6 +220,7 @@ The mesh archive and `result.json` are required terminal outputs. If either cann
 | `checkpoints.sqlite` | Workflow checkpoints used while the current run is paused for human input. |
 | `pause.json` | A saved pause response; the checkpoint determines the current pending action. |
 | `artifacts/confirmed.scdoc` | CAD saved at the confirmed handoff. |
+| `artifacts/` and runtime staging | The original input is never modified. Extraction candidates and the isolated target working copy are retained before the labeled confirmation copy is created. |
 | `artifacts/mesh.msh.h5` | Exported mesh when meshing and validation succeed. |
 | `artifacts/success-runtime/` or `artifacts/failure-runtime/` | Archived worker logs, transcripts, controls, and runtime evidence. Successful-run evidence excludes files already archived directly under `artifacts/`. |
 | `artifacts/<stage>-error.json` | Structured error code, object context, raw error evidence, and suggested action for a failed stage. |
@@ -251,7 +255,7 @@ The source lives directly in `src/`. Tests live in `tests/`. The old `cfd_agent`
 | `adapters/spaceclaim_build.py` | Extract or reuse the fluid domain, create boundary groups, and request CAD saves. |
 | `nodes/` | Workflow steps and state updates. |
 | `services/selection.py` | LLM screening, detail review, and mesh requirement parsing. |
-| `services/openings.py` | Resolve CAD faces, loops, and edges into extraction openings. |
+| `services/openings.py` | Validate explicit face, loop, or edge references and construct native extraction arguments. |
 | `services/geometry_catalog.py` | Geometry catalog data models and model-visible object attributes. |
 | `services/cli_output.py` | Command-line progress, errors, and outcome summaries. |
 | `workers/spaceclaim/` | Native `query.py`, `build.py`, `save.py`, and shared `common.py` helpers. These scripts still target API V241 and run in SpaceClaim's IronPython environment. |
@@ -265,7 +269,7 @@ Native SpaceClaim and Fluent integration tests require an available installation
 
 Input remains an existing `.scdoc` file plus a non-empty UTF-8 prompt file. Users may describe lengths in any unambiguous unit. The LLM converts mesh-control lengths to metres, retains `original_expression`, records the conversion in `basis`, and preserves `user`/`inferred` provenance. The program checks positive finite length values but does not independently verify conversion arithmetic. Missing or ambiguous units and unsupported meshing requests pause for clarification. Geometry import units remain separate and retain their existing supported values; mesh-control normalization must not change CAD scale.
 
-Catalogs no longer emit or check a schema version. Geometry signatures compare full serialized numeric values without 12-significant-digit rounding; even small numeric differences can now reject a stale catalog. Topology, native Moniker identity and active-selection checks remain. Numeric sorting uses unrounded values with Moniker tie-breaking; old catalogs/checkpoints are not migrated. Model-visible properties follow declared catalog fields, excluding fields marked internal; undeclared extras are not sent to the model. Native closed-edge data, rather than the Circle type alone, determines closed-edge screenshot candidates.
+Catalogs no longer emit or check a schema version. Geometry signatures compare full serialized numeric values without 12-significant-digit rounding; even small numeric differences can now reject a stale catalog. Topology, native Moniker identity and active-selection checks remain. Numeric sorting uses unrounded values with Moniker tie-breaking; old catalogs/checkpoints are not migrated. Model-visible properties follow declared catalog fields, excluding fields marked internal; undeclared extras are not sent to the model. Edge closure and adjacent-face data remain descriptive catalog evidence; they do not filter the model's explicit extraction choices.
 
 Python configuration example (the existing prompt-file API is unchanged):
 

@@ -7,8 +7,6 @@ import pytest
 
 from src.services.boundaries import build_fluent_job, rebind_mesh_targets
 from src.services.contracts import (
-    CadSelectionPlan,
-    ConfirmationPayload,
     MeshRequirements,
     NumericControl,
 )
@@ -18,29 +16,6 @@ from src.services.units import convert_length
 from src.workers.fluent.job import MeshJob
 from src.workers.fluent.meshing import WatertightMeshingRunner
 from src.workers.fluent.repair import RepairState
-
-
-def test_selected_plan_requires_seed_and_opening():
-    with pytest.raises(ValueError):
-        CadSelectionPlan.model_validate(
-            {
-                "status": "selected",
-                "reference_view": "Isometric",
-                "openings": [],
-                "seed_inner_wall_id": None,
-                "explanation": "missing",
-            }
-        )
-
-
-def test_confirmation_accepts_four_boundary_roles():
-    payload = ConfirmationPayload.model_validate(
-        {
-            "action": "approve",
-            "boundary_roles": {"a": "inlet", "b": "outlet", "c": "wall", "d": "symmetry"},
-        }
-    )
-    assert payload.boundary_roles["d"] == "symmetry"
 
 
 def test_unspecified_meshing_values_remain_native_defaults(tmp_path: Path):
@@ -708,7 +683,7 @@ def test_model_converted_length_reaches_job_without_changing_import_unit(monkeyp
     )
     parsed = extract_mesh_requirements(
         catalog=GeometryCatalog(catalog_id="c", geometry_id="g"),
-        user_prompt="Use 20 micrometres", selection_plan=SimpleNamespace(openings=[]),
+        user_prompt="Use 20 micrometres", boundary_names=[],
         audit_dir=tmp_path,
     )
     geometry = tmp_path / "confirmed.scdoc"

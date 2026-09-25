@@ -14,8 +14,8 @@ from src.services.boundaries import (
     rebind_mesh_targets,
     validate_confirmed_cad,
 )
-from src.services.contracts import ConfirmationPayload, HumanInterventionPayload
-from src.services.execution import _failed, _run_dir, _succeeded
+from src.services.contracts import ConfirmationPayload, HumanInterventionPayload, clarification_step
+from src.services.execution import _failed, _run_dir, _succeeded, cad_restart_update
 from src.services.spaceclaim_runtime import open_spaceclaim_reader
 from src.state import PipelineState
 
@@ -69,13 +69,15 @@ def human_intervention(state: PipelineState) -> Command:
         if payload.action != "clarify":
             raise ValueError("Clarification requests require action=clarify or cancel")
         clarified = state["prompt"].rstrip() + "\n\nUSER CLARIFICATION:\n" + payload.clarification.strip()
+        resume = clarification_step(request.get("resume_step", "understand_prompt"))
         return Command(
             update={
+                **cad_restart_update(state, resume),
                 "prompt": clarified,
                 "repair_rounds": 0,
                 "human_request": {},
             },
-            goto="understand_prompt",
+            goto=resume,
         )
     if kind == "parameter_change":
         if payload.action != "approve":

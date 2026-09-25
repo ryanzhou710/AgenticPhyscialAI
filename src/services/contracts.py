@@ -11,11 +11,18 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 class OpeningSelection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    candidate_id: str
+    selection_kind: Literal["face", "loop", "edges"]
+    object_ids: list[str] = Field(min_length=1)
     role: Literal["inlet", "outlet", "symmetry"]
     name: str
     description: str
     reason: str
+
+    @model_validator(mode="after")
+    def selection_is_explicit(self):
+        if self.selection_kind in {"face", "loop"} and len(self.object_ids) != 1:
+            raise ValueError("face and loop opening selections require exactly one object ID")
+        return self
 
 
 class CadSelectionPlan(BaseModel):
@@ -25,6 +32,8 @@ class CadSelectionPlan(BaseModel):
     reference_view: Literal["Front", "Back", "Top", "Bottom", "Right", "Left", "Isometric"]
     openings: list[OpeningSelection] = Field(default_factory=list)
     seed_inner_wall_id: str | None = None
+    fluid_body_id: str | None = None
+    extraction_strategy: Literal["faces", "edges"] | None = None
     explanation: str
     missing_information: list[str] = Field(default_factory=list)
     fluid_domain_action: Literal["extract", "reuse", "ambiguous"] = "extract"
@@ -32,11 +41,25 @@ class CadSelectionPlan(BaseModel):
 
     @model_validator(mode="after")
     def selected_has_objects(self):
-        if self.status == "selected" and (not self.openings or not self.seed_inner_wall_id):
-            raise ValueError("selected requires openings and seed_inner_wall_id")
-        ids = [item.candidate_id for item in self.openings]
-        if len(ids) != len(set(ids)):
-            raise ValueError("opening candidate IDs must be unique")
+        if self.status != "selected":
+            return self
+        if self.fluid_domain_action == "extract":
+            if not self.openings or not self.seed_inner_wall_id or not self.extraction_strategy:
+                raise ValueError("extract requires openings, seed_inner_wall_id, and extraction_strategy")
+            if self.fluid_body_id is not None:
+                raise ValueError("extract must not include fluid_body_id")
+            expected_kinds = (
+                {"face"} if self.extraction_strategy == "faces" else {"loop", "edges"}
+            )
+            if any(opening.selection_kind not in expected_kinds for opening in self.openings):
+                raise ValueError("opening selection_kind must match extraction_strategy")
+        elif self.fluid_domain_action == "reuse":
+            if not self.fluid_body_id:
+                raise ValueError("reuse requires fluid_body_id")
+            if self.openings or self.seed_inner_wall_id or self.extraction_strategy:
+                raise ValueError("reuse must select only fluid_body_id")
+        else:
+            raise ValueError("selected requires extract or reuse fluid_domain_action")
         names = [item.name for item in self.openings]
         if len(names) != len(set(names)):
             raise ValueError("boundary names must be unique")
@@ -52,7 +75,7 @@ class CandidateDetailRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     candidate_id: str
-    purpose: Literal["opening", "seed"]
+    purpose: Literal["opening", "seed", "body", "boundary"]
     views: list[DetailView] = Field(default_factory=list)
     reason: str
 
@@ -104,6 +127,77 @@ class CadSelectionReview(BaseModel):
             raise ValueError("needs_details review requires detail_requests")
         elif self.selection is not None:
             raise ValueError("only selected review may include selection")
+        return self
+
+
+CLARIFICATION_STEPS = frozenset({
+    "understand_prompt", "select_fluid_body", "plan_boundary_groups",
+})
+
+
+def clarification_step(value: str) -> str:
+    if value not in CLARIFICATION_STEPS:
+        raise ValueError("Unsupported clarification resume step: " + str(value))
+    return value
+
+
+class BoundaryFaceGroup(BaseModel):
+    """A real face set on the selected fluid body, ready for SpaceClaim grouping."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    role: Literal["inlet", "outlet", "wall", "symmetry"]
+    face_ids: list[str]
+    reason: str
+
+class BoundaryGroupPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["selected", "ambiguous", "not_found"]
+    target_catalog_id: str
+    groups: list[BoundaryFaceGroup] = Field(default_factory=list)
+    explanation: str
+    missing_information: list[str] = Field(default_factory=list)
+
+class BoundaryGroupReview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["selected", "needs_details", "ambiguous", "not_found"]
+    selection: BoundaryGroupPlan | None = None
+    detail_requests: list[CandidateDetailRequest] = Field(default_factory=list)
+    explanation: str
+    missing_information: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def review_has_consistent_payload(self):
+        if self.status == "selected":
+            if self.selection is None or self.selection.status != "selected":
+                raise ValueError("selected review requires a selected boundary-group plan")
+        elif self.status == "needs_details" and not self.detail_requests:
+            raise ValueError("needs_details review requires detail_requests")
+        elif self.selection is not None:
+            raise ValueError("only selected review may include selection")
+        return self
+
+
+class FluidBodySelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["selected", "needs_details", "ambiguous", "not_found"]
+    body_id: str | None = None
+    detail_requests: list[CandidateDetailRequest] = Field(default_factory=list)
+    explanation: str
+    missing_information: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def selected_has_body(self):
+        if self.status == "selected" and not self.body_id:
+            raise ValueError("selected requires body_id")
+        if self.status == "needs_details" and not self.detail_requests:
+            raise ValueError("needs_details requires detail_requests")
+        if self.status != "selected" and self.body_id is not None:
+            raise ValueError("only selected may include body_id")
         return self
 
 
@@ -163,12 +257,6 @@ class MeshRequirements(BaseModel):
 
 class EmptyRepairParameters(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-
-class ObjectReferenceParameters(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    field: str = Field(description="seed_inner_wall_id or opening:<existing opening name>")
-    candidate_id: str
 
 
 class ValueParameters(BaseModel):
@@ -235,7 +323,7 @@ REPAIR_ACTIONS: dict[str, RepairActionSpec] = {
     "retry_step": RepairActionSpec(
         EmptyRepairParameters, route="retry", worker_handler="_apply_retry"
     ),
-    "replace_object_reference": RepairActionSpec(ObjectReferenceParameters, route="cad"),
+    "reselect_cad": RepairActionSpec(EmptyRepairParameters, route="cad"),
     "set_global_size": RepairActionSpec(
         ValueParameters,
         route="fluent",
@@ -337,6 +425,8 @@ class RepairDecision(BaseModel):
         "understand_prompt",
         "verify_selection",
         "extract_volume",
+        "select_fluid_body",
+        "plan_boundary_groups",
         "label_faces",
         "validate_cad",
         "human_confirmation",

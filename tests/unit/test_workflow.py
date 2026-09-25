@@ -15,6 +15,7 @@ from src.nodes import confirmation, fluent, review
 from src.nodes.confirmation import human_confirmation
 from src.nodes.review import review_failure
 from src.services.contracts import RepairDecision
+from src.services.geometry_catalog import GeometryCatalog
 from src.state import PipelineState
 from src.workers.fluent.job import MeshJob
 from src.workers.fluent.repair import RepairState
@@ -23,7 +24,14 @@ from src.workers.fluent.repair import RepairState
 def test_graph_contains_spaceclaim_and_fluent_steps(tmp_path: Path):
     graph = build_graph(tmp_path / "checkpoints.sqlite")
     names = set(graph.get_graph().nodes)
-    assert {"extract_volume", "label_faces", "human_confirmation", "launch_fluent"} <= names
+    assert {
+        "extract_volume",
+        "select_fluid_body",
+        "plan_boundary_groups",
+        "label_faces",
+        "human_confirmation",
+        "launch_fluent",
+    } <= names
     assert not any(name.startswith("rebuild") for name in names)
     assert {
         "import_geometry",
@@ -156,25 +164,6 @@ def test_reviewer_retry_cannot_silently_ignore_parameters():
         )
 
 
-def test_reviewer_reference_requires_the_executable_fields():
-    with pytest.raises(ValidationError):
-        RepairDecision(
-            diagnosis="reference",
-            evidence="error",
-            action="replace_object_reference",
-            target_step="verify_selection",
-            parameters={"reference_view": "Isometric"},
-        )
-    decision = RepairDecision(
-        diagnosis="reference",
-        evidence="error",
-        action="replace_object_reference",
-        target_step="verify_selection",
-        parameters={"field": "seed_inner_wall_id", "candidate_id": "F0001"},
-    )
-    assert decision.parameters["field"] == "seed_inner_wall_id"
-
-
 def test_fluent_review_uses_structured_requirements_without_old_cad_notes():
     from src.services.reviewer import fluent_review_inputs
 
@@ -212,8 +201,19 @@ def test_gui_editing_window_is_kept_without_final_keep_open(tmp_path, monkeypatc
             "run_dir": str(tmp_path),
             "ui_mode": "gui",
             "keep_open": False,
-            "working_geometry": "extracted.scdoc",
-            "extraction": {},
+            "working_geometry": "target-fluid.scdoc",
+            "target_catalog": GeometryCatalog(
+                catalog_id="target",
+                geometry_id="target",
+                bodies=[{"id": "B1", "kind": "body", "solid_or_sheet": "solid", "volume_m3": 1.0}],
+                faces=[{"id": "F1", "kind": "face", "body_id": "B1"}],
+                native_catalog={"public": {}, "internal": {}},
+            ).model_dump(mode="json"),
+            "target_body": {"body_id": "B1"},
+            "boundary_group_plan": {
+                "groups": [{"name": "wall", "role": "wall", "face_ids": ["F1"]}]
+            },
+            "artifacts": {},
         }
     )
     assert not result["error"]
@@ -254,9 +254,9 @@ def test_cancel_ends_graph_without_review_or_cad_reload(tmp_path, monkeypatch):
         ("surface_mesh", "retry_step", "import_geometry", {}),
         (
             "surface_mesh",
-            "replace_object_reference",
-            "verify_selection",
-            {"field": "seed_inner_wall_id", "candidate_id": "F1"},
+                "reselect_cad",
+                "verify_selection",
+                {},
         ),
         ("extract_volume", "set_global_size", "surface_mesh", {"value": 1}),
         ("surface_mesh", "set_layer_count", "boundary_layers", {"value": 3}),

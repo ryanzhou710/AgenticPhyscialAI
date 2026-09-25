@@ -163,3 +163,31 @@ def test_detail_renderer_passes_only_requested_views_and_labels_them(tmp_path, m
     ]
     assert [row["view"] for row in result] == ["OwnerContext", "SelectedProxy"]
     assert labels == [("F1", "OwnerContext"), ("F1", "SelectedProxy")]
+
+
+def test_detail_renderer_uses_configured_batch_limit(tmp_path, monkeypatch):
+    from src.config import RuntimeConfig
+    from src.services.geometry_catalog import GeometryCatalog
+
+    runner = SpaceClaimRunner(
+        output_dir=tmp_path / "output",
+        config=RuntimeConfig(selection_max_candidates_per_round=13),
+    )
+    batches = []
+
+    def batch_select(path, catalog, selections):
+        batches.append(selections)
+        return [{"images": []} for _ in selections]
+
+    monkeypatch.setattr(runner, "batch_select", batch_select)
+    requests = [
+        {"candidate_id": str(index), "purpose": "boundary", "detail_views": ["Selected"]}
+        for index in range(13)
+    ]
+    geometry = GeometryCatalog(catalog_id="c", geometry_id="g")
+    runner.render_candidate_details(Path("fixture.scdoc"), geometry, requests)
+    assert len(batches[0]) == 13
+    runner.config = RuntimeConfig(selection_max_candidates_per_round=2)
+    with pytest.raises(ValueError, match="at most 2"):
+        runner.render_candidate_details(Path("fixture.scdoc"), geometry, requests[:3])
+    assert len(batches) == 1

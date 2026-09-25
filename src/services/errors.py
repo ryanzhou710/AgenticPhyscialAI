@@ -30,10 +30,6 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "The mesh passed validation, but Fluent could not create its preview image.",
         "Inspect the preview-error record; the validated mesh artifact is still available.",
     ),
-    "CAD_CANDIDATE_PURPOSE_CONFLICT": (
-        "The same candidate was requested as both an opening and an inner-wall seed.",
-        "Choose separate opening contours and an inner-wall seed face.",
-    ),
     "CAD_CANDIDATE_UNKNOWN": (
         "The model requested an object that is absent from the current geometry catalog.",
         "Reload the CAD and select only objects present in the catalog.",
@@ -44,47 +40,19 @@ _MESSAGES: dict[str, tuple[str, str]] = {
     ),
     "CAD_DETAIL_EVIDENCE_REPEATED": (
         "The model requested only candidate detail images that were already supplied.",
-        "Clarify the opening, inner wall, or reference-view feature that distinguishes the candidates.",
+        "Clarify the object or face feature that distinguishes the remaining candidates.",
     ),
     "CAD_DETAIL_RENDER_FAILED": (
         "SpaceClaim did not produce every requested candidate detail image.",
         "Check whether the CAD objects remain valid and inspect the SpaceClaim rendering record.",
     ),
     "CAD_OPENING_UNSUPPORTED_OBJECT": (
-        "An opening must be represented by a face, a closed loop, or a closed edge.",
-        "Choose a supported opening object from the current catalog.",
-    ),
-    "CAD_OPENING_SUPPORT_FACE_MISSING": (
-        "The opening contour has no usable support face.",
-        "Choose a contour attached to a valid planar support face.",
-    ),
-    "CAD_OPENING_SUPPORT_NOT_PLANAR": (
-        "The opening support face is not planar and cannot be safely capped by this workflow.",
-        "Choose a planar opening contour or revise the CAD before extraction.",
-    ),
-    "CAD_OPENING_NOT_CLOSED": (
-        "The opening contour is not a closed boundary and cannot be safely capped.",
-        "Choose a closed contour or repair the opening in SpaceClaim.",
+        "The selected object does not match the requested native extraction method.",
+        "Use faces for face extraction, or loops and edges for edge extraction.",
     ),
     "CAD_OPENING_EMPTY": (
         "No usable opening contour is available, or the contour contains no edges.",
         "Specify at least one valid inlet or outlet opening.",
-    ),
-    "CAD_OPENING_EDGE_MISSING": (
-        "The opening contour references an edge that is absent from the current CAD.",
-        "Reload the CAD and choose a contour whose edges still exist.",
-    ),
-    "CAD_OPENING_AMBIGUOUS": (
-        "The opening object has multiple possible contours, so the cap cannot be identified uniquely.",
-        "Inspect the listed candidate loops and explicitly select one opening contour.",
-    ),
-    "CAD_OPENING_UNKNOWN": (
-        "The selected opening object is absent from the current CAD.",
-        "Reload the CAD and choose an existing opening object.",
-    ),
-    "CAD_OPENING_OVERLAP": (
-        "Two opening selections reuse the same boundary edge set.",
-        "Choose non-overlapping contours for each inlet and outlet.",
     ),
     "CAD_SEED_NOT_FACE": (
         "The inner-wall seed must be a face object.",
@@ -99,16 +67,12 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "Check the license, SpaceClaim installation, and extraction timeout.",
     ),
     "CAD_VOLUME_EXTRACT_FAILED": (
-        "SpaceClaim could not create one positive-volume fluid domain from the confirmed openings and seed face.",
-        "Check the opening caps, seed location, and extraction-attempt record.",
+        "SpaceClaim could not create a positive-volume fluid body from the selected objects.",
+        "Inspect the selected objects, extraction method, and native extraction record.",
     ),
     "CAD_CONFIRMED_SOLID_INVALID": (
         "The confirmed CAD must contain exactly one positive-volume solid.",
         "Remove extra bodies or repair zero-volume bodies, then save the CAD again.",
-    ),
-    "CAD_CONFIRMED_OPEN_TOPOLOGY": (
-        "The confirmed fluid body has free edges and is not closed.",
-        "Close every opening in SpaceClaim and save the CAD again.",
     ),
     "CAD_CONFIRMED_GROUP_ROLE_MISMATCH": (
         "The confirmed boundary groups do not match the confirmed role names.",

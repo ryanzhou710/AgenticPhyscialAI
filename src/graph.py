@@ -25,6 +25,8 @@ def build_graph(checkpoint_path: str | Path):
     add_node("understand_prompt", cad.understand_prompt)
     add_node("verify_selection", cad.verify_selection)
     add_node("extract_volume", cad.extract_volume)
+    add_node("select_fluid_body", cad.select_fluid_body)
+    add_node("plan_boundary_groups", cad.plan_boundary_groups)
     add_node("label_faces", cad.label_faces)
     add_node("validate_cad", cad.validate_cad)
     add_node("human_confirmation", confirmation.human_confirmation)
@@ -46,6 +48,8 @@ def build_graph(checkpoint_path: str | Path):
         "understand_prompt",
         "verify_selection",
         "extract_volume",
+        "select_fluid_body",
+        "plan_boundary_groups",
         "label_faces",
         "validate_cad",
     ]

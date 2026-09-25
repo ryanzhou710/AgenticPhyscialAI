@@ -11,6 +11,7 @@ from src.adapters import fluent as transport
 from src.adapters import spaceclaim_build
 from src.services.boundaries import validate_confirmed_cad
 from src.services.cli_output import progress_node
+from src.services.contracts import ConfirmationPayload
 from src.services.errors import PipelineError
 from src.services.geometry_catalog import GeometryCatalog
 
@@ -25,6 +26,41 @@ def paused(tmp_path):
             "working_geometry": str(tmp_path / "working.scdoc"),
         },
     }
+
+
+def test_confirmation_does_not_reject_an_edge_by_adjacent_face_count():
+    catalog = GeometryCatalog(
+        catalog_id="confirmed",
+        geometry_id="working",
+        bodies=[
+            {
+                "id": "B1",
+                "kind": "body",
+                "solid_or_sheet": "solid",
+                "volume_m3": 1.0,
+            }
+        ],
+        faces=[
+            {"id": "F1", "kind": "face", "body_id": "B1"},
+            {"id": "F2", "kind": "face", "body_id": "B1"},
+        ],
+        edges=[{"id": "E1", "kind": "edge", "body_id": "B1", "face_ids": ["F1"]}],
+        native_catalog={
+            "internal": {
+                "raw_groups": [
+                    {"raw_name": "inlet", "member_ids": ["F1"]},
+                    {"raw_name": "outlet", "member_ids": ["F2"]},
+                ]
+            }
+        },
+    )
+
+    validation = validate_confirmed_cad(
+        catalog=catalog, roles={"inlet": "inlet", "outlet": "outlet"}
+    )
+
+    assert validation["positive_volume"] is True
+    assert "no_reported_free_edges" not in validation
 
 
 @pytest.mark.parametrize("answer", ["no", "NO", " No "])
@@ -423,3 +459,13 @@ def test_confirmed_cad_blocks_invalid_group_edits(groups, code):
     with pytest.raises(PipelineError) as error:
         validate_confirmed_cad(catalog=confirmed_catalog(groups), roles=roles())
     assert error.value.detail["code"] == code
+
+
+def test_confirmation_accepts_four_boundary_roles():
+    payload = ConfirmationPayload.model_validate(
+        {
+            "action": "approve",
+            "boundary_roles": {"a": "inlet", "b": "outlet", "c": "wall", "d": "symmetry"},
+        }
+    )
+    assert payload.boundary_roles["d"] == "symmetry"

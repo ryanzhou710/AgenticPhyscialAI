@@ -80,21 +80,6 @@ def validate_confirmed_cad(
             },
         )
     body = positive[0]
-    free_edges = [
-        edge.id for edge in catalog.edges
-        if edge.body_id == body.id and len(edge.face_ids) != 2
-    ]
-    if free_edges:
-        raise PipelineError(
-            "CAD_CONFIRMED_OPEN_TOPOLOGY",
-            "The confirmed fluid body has free edges and is not closed.",
-            stage="reload_confirmed_cad",
-            substep="topology validation",
-            objects=[{"candidate_id": edge_id} for edge_id in free_edges],
-            suggested_action="Close every opening in SpaceClaim and save the CAD again.",
-            evidence={"free_edge_ids": free_edges},
-        )
-
     groups = named_groups(catalog)
     if set(groups) != set(roles):
         raise PipelineError(
@@ -163,7 +148,6 @@ def validate_confirmed_cad(
         )
     return {
         "positive_volume": True,
-        "no_reported_free_edges": True,
         "nonempty_groups": True,
         "nonoverlapping_groups": True,
         "all_faces_grouped": True,

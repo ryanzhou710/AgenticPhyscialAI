@@ -165,10 +165,13 @@ def test_selection_requirements_and_reviewer_share_configured_model(tmp_path, mo
         status="selected",
         reference_view="Front",
         explanation="offline",
+        fluid_domain_action="extract",
+        extraction_strategy="faces",
         seed_inner_wall_id="F2",
         openings=[
             {
-                "candidate_id": "F1",
+                "selection_kind": "face",
+                "object_ids": ["F1"],
                 "role": "inlet",
                 "name": "feed",
                 "description": "opening",
@@ -207,7 +210,7 @@ def test_selection_requirements_and_reviewer_share_configured_model(tmp_path, mo
     selection.extract_mesh_requirements(
         catalog=catalog,
         user_prompt="mesh",
-        selection_plan=plan,
+        boundary_names=[opening.name for opening in plan.openings],
         audit_dir=tmp_path,
         config=settings,
     )

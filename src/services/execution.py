@@ -25,6 +25,38 @@ def _run_dir(state: PipelineState) -> Path:
     return Path(state["run_dir"])
 
 
+def cad_restart_update(state: PipelineState, stage: str) -> dict[str, Any]:
+    """Invalidate the rerun's products, preserving its inputs and failure history."""
+    stages = (
+        ("prepare", ()),
+        ("query_geometry", ("catalog",)),
+        ("understand_prompt", ("selection_plan",)),
+        ("verify_selection", ("native_selection",)),
+        ("extract_volume", ("extraction", "extraction_catalog")),
+        ("select_fluid_body", ("target_body", "target_catalog")),
+        ("plan_boundary_groups", ("boundary_group_plan", "mesh_requirements", "parsed_mesh_requirements")),
+        ("label_faces", ("labeling", "boundary_roles")),
+        ("validate_cad", ("cad_validation",)),
+    )
+    names = [name for name, _ in stages]
+    if stage not in names:
+        return {}
+    index = names.index(stage)
+    update = {field: {} for _, fields in stages[index:] for field in fields}
+    update.update({
+        "confirmed_geometry": "", "human_response": {}, "human_request": {},
+        "repair_approved": False, "fluent_job": {},
+        "fluent_steps": {}, "final_execution": {}, "result": {},
+    })
+    if index <= names.index("extract_volume"):
+        update["working_geometry"] = str(Path(state["runtime_dir"]) / "original.scdoc")
+    elif stage == "select_fluid_body":
+        update["working_geometry"] = state["extraction"]["candidate_geometry"]
+    elif stage in {"plan_boundary_groups", "label_faces"}:
+        update["working_geometry"] = str(Path(state["runtime_dir"]) / "target-fluid.scdoc")
+    return update
+
+
 def _persist(state: PipelineState, stage: str, update: dict[str, Any]) -> dict[str, Any]:
     record = {**state, **update, "current_step": stage}
     write_json(

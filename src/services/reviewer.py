@@ -12,14 +12,14 @@ from src.adapters.fluent import close_client, get_client
 from src.adapters.llm import GroundingLLMClient
 from src.config import config_from_state
 from src.services.contracts import RepairDecision, repair_action_spec, repair_tool_catalog
-from src.services.execution import _copy_runtime_evidence, _persist, _run_dir
+from src.services.execution import _copy_runtime_evidence, _persist, _run_dir, cad_restart_update
 from src.services.geometry_catalog import GeometryCatalog
 from src.state import PipelineState
 from src.workers.fluent.repair import STEP_ORDER
 
 FLUENT_STEPS = STEP_ORDER[:-1]
 VISUAL_REVIEW_STEPS = frozenset({
-    "verify_selection", "extract_volume", "label_faces",
+    "verify_selection", "extract_volume", "select_fluid_body", "plan_boundary_groups", "label_faces",
     "surface_mesh", "boundary_layers", "volume_mesh", "final_validation",
 })
 TEXT_ONLY_ERROR_CODES = frozenset({
@@ -31,6 +31,8 @@ CAD_STEPS = (
     "understand_prompt",
     "verify_selection",
     "extract_volume",
+    "select_fluid_body",
+    "plan_boundary_groups",
     "label_faces",
     "validate_cad",
 )
@@ -56,14 +58,13 @@ def _repair_resume_step(state: PipelineState, decision: RepairDecision) -> str:
         return target
     if spec.route == "cad":
         if (
-            failed not in CAD_STEPS[3:]
-            or target not in CAD_STEPS[3:]
-            or CAD_STEPS.index(target) > CAD_STEPS.index(failed)
+            failed not in CAD_STEPS[2:]
+            or target not in CAD_STEPS[2:]
             or state.get("confirmed_geometry")
             or state.get("human_response", {}).get("action") == "approve"
         ):
-            raise ValueError("Object references can only be repaired before CAD confirmation")
-        return "verify_selection"
+            raise ValueError("CAD reselection can only run before CAD confirmation")
+        return "understand_prompt"
     if spec.route == "human":
         request = state.get("human_request", {})
         if request.get("kind") in {"clarification", "parameter_change", "boundary_mapping"}:
@@ -385,17 +386,31 @@ def diagnose_failure(state: PipelineState) -> dict[str, Any]:
         if fluent_failure:
             evidence["mesh_requirements"], evidence["fluent_job"] = fluent_review_inputs(state)
         images: list[Path] = []
-        if not fluent_failure and state.get("catalog"):
+        if not fluent_failure:
             evidence["selection_plan"] = state.get("selection_plan")
-            evidence["candidate_catalog"] = GeometryCatalog.model_validate(
-                state["catalog"]
-            ).public_dict()
+            catalog_state = (
+                state.get("target_catalog") or state.get("catalog")
+                if state["failed_step"] in {"plan_boundary_groups", "label_faces", "validate_cad"}
+                else state.get("extraction_catalog") or state.get("catalog")
+                if state["failed_step"] == "select_fluid_body"
+                else state.get("catalog")
+            )
+            if catalog_state:
+                evidence["candidate_catalog"] = GeometryCatalog.model_validate(
+                    catalog_state
+                ).public_dict()
+            evidence["target_body"] = state.get("target_body", {})
+            evidence["boundary_group_plan"] = state.get("boundary_group_plan", {})
             if use_visuals:
                 images.extend(
                     Path(row["path"])
                     for row in state.get("native_selection", {}).get("images", [])
                     if row.get("path") and Path(row["path"]).is_file()
                 )
+                for directory in ("selection-details", "boundary-details"):
+                    detail_root = _run_dir(state) / "artifacts" / directory
+                    if detail_root.is_dir():
+                        images.extend(sorted(detail_root.rglob("*.png")))
         if fluent_failure:
             try:
                 worker = get_client(state["run_id"], state["runtime_dir"], config_from_state(state))
@@ -436,14 +451,14 @@ def diagnose_failure(state: PipelineState) -> dict[str, Any]:
                 "The evidence includes available_tools with the exact JSON parameter schemas. Do\n"
                 "not invent parameters. retry_step takes an empty object and repeats the operation\n"
                 "unchanged; it cannot change views, source code, or any other configuration.\n"
-                "For retry_step, target_step must equal failed_step. Object-reference repairs are\n"
+                "For retry_step, target_step must equal failed_step. CAD reselection is\n"
                 "allowed only before CAD confirmation. Fluent control repairs must target the failed\n"
                 "step or the affected earlier step; they cannot skip a failure or return to CAD construction.\n"
                 "return_to_human is available only after reaching the CAD handoff, with target_step\n"
                 "set to failed_step or human_confirmation. Invalid repair routes stop execution.\n"
-                "replace_object_reference takes field and candidate_id. It changes only the named\n"
-                "selection reference and restarts verification on the original CAD. Use only a\n"
-                "candidate present in the supplied real catalog, preserving the requested role.\n"
+                "reselect_cad takes an empty object and restarts the LLM selection process on the\n"
+                "original CAD. Use it when the selected extraction method or object references\n"
+                "must change; never silently substitute an object in the existing plan.\n"
                 "Fluent controls use value; set_local_size additionally requires zone.\n"
                 "set_layer_count changes the integer boundary-layer count; set_first_layer_height\n"
                 "changes its first height. All repair lengths use the current Fluent import unit\n"
@@ -522,53 +537,28 @@ def execute_repair(state: PipelineState) -> RepairOutcome:
     target = decision.target_step
     fluent_targets = {*FLUENT_STEPS, "final_validation"}
     if spec.route == "retry" and target not in fluent_targets:
-        return RepairOutcome(update={"status": "running"}, goto=target)
+        return RepairOutcome(update={**cad_restart_update(state, target), "status": "running"}, goto=target)
     if spec.route == "cad":
-        if target not in {"verify_selection", "extract_volume", "label_faces", "validate_cad"}:
+        if target not in {
+            "understand_prompt",
+            "verify_selection",
+            "extract_volume",
+            "select_fluid_body",
+            "plan_boundary_groups",
+            "label_faces",
+            "validate_cad",
+        }:
             return _repair_application_failed(
                 state,
-                reason="invalid_object_reference_repair",
-                error="replace_object_reference is not valid for this step",
+                reason="invalid_cad_reselection",
+                error="reselect_cad is not valid for this step",
             )
-        parameters = decision.parameters
-        candidate_id = str(parameters.get("candidate_id", ""))
-        field = str(parameters.get("field", ""))
-        catalog = GeometryCatalog.model_validate(state["catalog"])
-        if candidate_id not in catalog.by_id():
-            return _repair_application_failed(
-                state,
-                reason="invalid_object_reference_repair",
-                error="Reviewer candidate_id is absent",
-            )
-        plan = copy.deepcopy(state["selection_plan"])
-        if field == "seed_inner_wall_id":
-            plan["seed_inner_wall_id"] = candidate_id
-        elif field.startswith("opening:"):
-            name = field.split(":", 1)[1]
-            matches = [item for item in plan["openings"] if item["name"] == name]
-            if len(matches) != 1:
-                return _repair_application_failed(
-                    state,
-                    reason="invalid_object_reference_repair",
-                    error="Reviewer opening name is not unique",
-                )
-            matches[0]["candidate_id"] = candidate_id
-        else:
-            return _repair_application_failed(
-                state,
-                reason="invalid_object_reference_repair",
-                error="Reviewer object field is invalid",
-            )
-        original = str(Path(state["runtime_dir"]) / "original.scdoc")
         return RepairOutcome(
             update={
-                "selection_plan": plan,
-                "working_geometry": original,
-                "extraction": {},
-                "labeling": {},
+                **cad_restart_update(state, resume),
                 "status": "running",
             },
-            goto="verify_selection",
+            goto=resume,
         )
     if spec.route == "human":
         close_client(state["run_id"])
